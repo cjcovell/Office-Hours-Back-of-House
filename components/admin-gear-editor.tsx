@@ -15,6 +15,7 @@ import {
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
+import { GearAiAssist } from "@/components/gear-ai-assist";
 import { ImageUploader } from "@/components/image-uploader";
 import { AmazonLink } from "@/components/amazon-link";
 import {
@@ -101,7 +102,25 @@ export function AdminGearEditor({ gear }: { gear: GearItemRow }) {
 
       <Card>
         <CardContent className="space-y-4 p-6">
-          <h2 className="text-lg font-semibold tracking-tight">Details</h2>
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <h2 className="text-lg font-semibold tracking-tight">Details</h2>
+            <GearAiAssist
+              initialQuery={[form.brand, form.name, form.model]
+                .filter(Boolean)
+                .join(" ")
+                .trim()}
+              onFilled={(s) =>
+                setForm({
+                  ...form,
+                  brand: s.brand,
+                  name: s.name,
+                  model: s.model,
+                  category: s.category,
+                  description: s.description,
+                })
+              }
+            />
+          </div>
           <div className="grid gap-3 sm:grid-cols-2">
             <Field
               label="Brand"

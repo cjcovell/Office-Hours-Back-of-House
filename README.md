@@ -14,6 +14,7 @@ gear that viewers rarely get to see.
 - **Next.js 15** (App Router) + **React 19** + **TypeScript**
 - **Tailwind v4** + **shadcn/ui** (new-york style, neutral palette)
 - **Supabase**: Postgres + Auth (OTP codes via email) + Storage
+- **Vercel AI Gateway** (`ai` + `@ai-sdk/gateway`): auto-fills gear catalog fields from a short description. Default model `anthropic/claude-haiku-4-5`; trivially swappable.
 - **supabase-js** for queries; **RLS** for authorization
 - **Vercel** target
 
@@ -366,6 +367,7 @@ git push origin main
 | Admin approve gear       | **Wired.** RLS-enforced; non-admins see a "promote yourself" message.                        |
 | Profile editor           | **Wired.** `/profile`. Headshot upload to headshots bucket (path-locked to contributor id).  |
 | Gear hero image          | **Wired.** Renders on `/gear/[id]` when `image_url` is set.                                  |
+| AI auto-fill             | **Wired.** "Auto-fill with AI" button on both the kit-editor "Create new gear" form and the admin gear editor. Fills brand / name / model / category / description from a short query via Vercel AI Gateway. ASIN and image stay manual. Rate-limited 10/min per user. |
 | Admin contributor picker | **Wired.** Admins land on `/kit` or `/profile` and pick which contributor to act as via `?as=<slug>`. |
 
 ## Auth flow
@@ -439,6 +441,51 @@ update public.users
   set linked_contributor_id = (select id from public.contributors where slug = 'your-slug')
   where email = 'you@example.com';
 ```
+
+## AI Gateway
+
+The "Auto-fill with AI" button in the kit editor + admin gear editor
+calls Vercel AI Gateway to turn a short description ("Sony FX3", "the
+black Shure dynamic mic") into structured catalog data.
+
+### Setup
+
+1. Vercel dashboard → your project → **AI** tab → enable **AI Gateway**.
+2. The integration auto-injects credentials for Production + Preview
+   environments via OIDC. No env var to set in Vercel.
+3. For **local dev**, either:
+   - Run `vercel env pull .env.local` to fetch the dev key, or
+   - Generate an API key in the AI Gateway dashboard and paste into
+     `.env.local` as `AI_GATEWAY_API_KEY=...`.
+
+### What it fills
+
+| Field       | AI fills? | Why / why not                                                   |
+| ----------- | --------- | --------------------------------------------------------------- |
+| Brand       | ✅         |                                                                 |
+| Name        | ✅         |                                                                 |
+| Model       | ✅         | Best effort; models occasionally guess SKUs. Admin reviews.    |
+| Category    | ✅         | Constrained to the `GEAR_CATEGORIES` enum.                      |
+| Description | ✅         | 1–2 factual sentences. System prompt bans marketing-speak.      |
+| Image       | ❌         | Text models can't produce product photography.                  |
+| ASIN        | ❌         | Models hallucinate 10-char codes; wrong ASIN breaks affiliates. |
+
+### Swapping the model
+
+`lib/ai/gear-enrich.ts` has a single `MODEL_ID` constant. Change to
+`openai/gpt-4o-mini`, `anthropic/claude-sonnet-4-5`, or any model the
+Gateway proxies. The structured-output schema is unchanged — the AI
+SDK handles the per-model tool-call plumbing.
+
+### Cost controls
+
+- Per-user rate limit: 10 requests/min (`lib/rate-limit.ts`).
+- Query capped at 500 chars.
+- Temperature not overridden (provider default).
+- One call per click — no streaming, no retries on client.
+
+If abuse becomes a concern, swap the in-memory rate limiter for
+Vercel KV / Upstash Redis.
 
 ## Storage
 

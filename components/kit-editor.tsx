@@ -9,6 +9,7 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
+import { GearAiAssist } from "@/components/gear-ai-assist";
 import { GearTypeahead } from "@/components/gear-typeahead";
 import { ImageUploader } from "@/components/image-uploader";
 import {
@@ -40,6 +41,7 @@ export function KitEditor({
     brand: string;
     model: string;
     category: string;
+    description: string;
     image_url: string | null;
   } | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -70,6 +72,7 @@ export function KitEditor({
     fd.set("brand", createDraft.brand);
     fd.set("model", createDraft.model);
     fd.set("category", createDraft.category);
+    if (createDraft.description) fd.set("description", createDraft.description);
     if (createDraft.image_url) fd.set("image_url", createDraft.image_url);
     if (notes) fd.set("notes", notes);
     startTransition(async () => {
@@ -138,6 +141,7 @@ export function KitEditor({
                 brand: "",
                 model: "",
                 category: "microphone",
+                description: "",
                 image_url: null,
               })
             }
@@ -263,6 +267,7 @@ function CreateGearForm({
     brand: string;
     model: string;
     category: string;
+    description: string;
     image_url: string | null;
   };
   setDraft: (d: typeof draft) => void;
@@ -274,10 +279,28 @@ function CreateGearForm({
   return (
     <Card>
       <CardContent className="space-y-4 p-4">
-        <p className="text-sm text-muted-foreground">
-          New gear is saved as <Badge variant="muted">Pending</Badge> until an
-          admin adds the affiliate link.
-        </p>
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <p className="text-sm text-muted-foreground">
+            New gear is saved as <Badge variant="muted">Pending</Badge> until
+            an admin adds the affiliate link.
+          </p>
+          <GearAiAssist
+            initialQuery={[draft.brand, draft.name, draft.model]
+              .filter(Boolean)
+              .join(" ")
+              .trim()}
+            onFilled={(s) =>
+              setDraft({
+                ...draft,
+                brand: s.brand,
+                name: s.name,
+                model: s.model,
+                category: s.category,
+                description: s.description,
+              })
+            }
+          />
+        </div>
         <div className="flex flex-col gap-4 sm:flex-row sm:items-start">
           <div className="flex-1 space-y-3">
             <div className="grid gap-3 sm:grid-cols-2">
@@ -313,6 +336,18 @@ function CreateGearForm({
                   ))}
                 </select>
               </div>
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="description">Description (optional)</Label>
+              <Textarea
+                id="description"
+                value={draft.description}
+                onChange={(e) =>
+                  setDraft({ ...draft, description: e.target.value })
+                }
+                rows={2}
+                placeholder="What is it, what's it used for?"
+              />
             </div>
           </div>
           <div className="space-y-2">

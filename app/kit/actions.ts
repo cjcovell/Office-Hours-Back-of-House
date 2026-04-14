@@ -49,6 +49,8 @@ export async function suggestGearAndAddAction(formData: FormData) {
   const brand = String(formData.get("brand") ?? "").trim();
   const model = String(formData.get("model") ?? "").trim();
   const category = String(formData.get("category") ?? "").trim();
+  const description =
+    (String(formData.get("description") ?? "").trim() || null) as string | null;
   const notes = (formData.get("notes") as string | null) || null;
   const imageUrl =
     (String(formData.get("image_url") ?? "").trim() || null) as string | null;
@@ -69,6 +71,7 @@ export async function suggestGearAndAddAction(formData: FormData) {
       brand,
       model,
       category,
+      description,
       status: "pending",
       image_url: imageUrl,
     })
