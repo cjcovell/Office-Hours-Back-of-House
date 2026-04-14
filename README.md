@@ -156,8 +156,10 @@ Visit:
 - `/contributors/jordan-park` — sample kit page
 - `/gear` — catalog with category filters
 - `/gear/<id>` — detail page with "Also used by"
-- `/kit?as=sam-rivera` — kit editor demo (auth stubbed; see below)
-- `/admin` — pending-gear queue (admin role required for writes)
+- `/login` — magic-link sign-in (check Inbucket at http://127.0.0.1:54324 for local emails)
+- `/kit` — kit editor (requires sign-in; admins can use `?as=<slug>`)
+- `/profile` — profile editor (requires sign-in)
+- `/admin` — pending-gear queue (requires admin role)
 
 ### 5. Reset / reseed
 
@@ -174,6 +176,183 @@ pnpm db:types
 
 Then swap the import in `lib/supabase/{server,client,admin}.ts` to point
 at the generated file and delete the hand-written `types.ts`.
+
+## Deploy to Vercel + Supabase
+
+One Supabase project, deployed to Vercel, with migrations applied via
+GitHub Actions on every push to `main`. Previews, production, and local
+dev all share the same Supabase project — fine for early-stage invite-
+only use; move to per-env projects later if/when preview writes start
+stepping on production data.
+
+### Prereqs
+
+- GitHub account (you're here)
+- Vercel account (free tier is fine)
+- Supabase account (free tier is fine for early traffic)
+- _[Optional]_ Custom domain and SMTP provider (Resend, Postmark, etc.)
+
+### 1. Create the production Supabase project
+
+1. Go to https://supabase.com/dashboard → **New project**.
+2. Name: `office-hours-back-of-house` (or whatever).
+3. Pick a region close to your audience.
+4. Pick a strong DB password — **save it**, you'll need it as a CI
+   secret.
+5. Wait ~2 minutes for provisioning.
+6. Note the **Project ref** (the slug in the dashboard URL, e.g.
+   `xyzabc12345`) and the **Project URL** (Settings → API).
+
+### 2. Import the repo into Vercel
+
+1. Go to https://vercel.com/new.
+2. Import from GitHub: pick this repo.
+3. Framework preset should auto-detect as **Next.js**.
+4. **Don't set env vars yet** — the integration in step 3 will sync
+   them in.
+5. Click **Deploy**. The first build will fail because envs are
+   missing. That's expected; you'll redeploy after step 3.
+
+### 3. Install the Vercel ↔ Supabase integration
+
+This is the step that syncs Supabase env vars into Vercel.
+
+1. Go to https://vercel.com/integrations/supabase → **Add integration**.
+2. Select your Vercel team + the imported project.
+3. Connect to Supabase and pick the project from step 1.
+4. The integration writes `NEXT_PUBLIC_SUPABASE_URL`,
+   `NEXT_PUBLIC_SUPABASE_ANON_KEY`, and `SUPABASE_SERVICE_ROLE_KEY`
+   into the Vercel project's Production, Preview, and Development envs.
+
+### 4. Add the remaining Vercel env vars
+
+In the Vercel project → Settings → Environment Variables, add:
+
+| Key                                | Env scope              | Example                        |
+| ---------------------------------- | ---------------------- | ------------------------------ |
+| `NEXT_PUBLIC_AMAZON_AFFILIATE_TAG` | Production + Preview   | `officehoursg-20`              |
+| `NEXT_PUBLIC_AMAZON_TLD`           | Production + Preview   | `com`                          |
+| `NEXT_PUBLIC_SITE_URL`             | Production only        | `https://yourdomain.com`       |
+
+Leave `NEXT_PUBLIC_SITE_URL` unset for Preview so each preview deploy
+uses its own origin for magic-link redirects.
+
+### 5. Configure Supabase Auth URLs
+
+Supabase dashboard → Authentication → URL Configuration:
+
+- **Site URL**: your production URL (e.g. `https://yourdomain.com` or
+  the Vercel-assigned URL).
+- **Redirect URLs** (allowlist, one per line):
+  - `https://yourdomain.com/auth/callback` — production
+  - `https://*-<your-vercel-team-slug>.vercel.app/auth/callback` — Vercel previews
+  - `http://localhost:3000/auth/callback` — local dev
+
+If you skip the preview wildcard, sign-in will fail on preview URLs.
+
+### 6. _[Recommended]_ Configure SMTP
+
+Supabase's default email sender is rate-limited (a few emails per hour)
+and mail often lands in spam. For production, wire a real provider:
+
+- **Resend** (free tier: 100/day) is easiest. Create a Resend account,
+  verify a sending domain, generate an API key.
+- In Supabase dashboard → Authentication → Emails → SMTP Settings:
+  - Host: `smtp.resend.com`
+  - Port: `587`
+  - Username: `resend`
+  - Password: your Resend API key
+  - Sender email: `noreply@yourdomain.com`
+
+Without this, you can still use Supabase's default for initial testing.
+
+### 7. Add GitHub Actions secrets for migrations
+
+Repo → Settings → Secrets and variables → Actions → **New repository
+secret** for each:
+
+| Secret                  | Where to get it                                                       |
+| ----------------------- | --------------------------------------------------------------------- |
+| `SUPABASE_ACCESS_TOKEN` | https://supabase.com/dashboard/account/tokens → **Generate new token** |
+| `SUPABASE_PROJECT_ID`   | Project ref from step 1 (dashboard URL slug)                          |
+| `SUPABASE_DB_PASSWORD`  | The DB password you set when creating the project                     |
+
+The workflow is `.github/workflows/db-migrate.yml`. It runs on every
+push to `main` that touches `supabase/migrations/**` and on manual
+dispatch from the Actions tab.
+
+### 8. First deploy
+
+```bash
+git push origin main
+```
+
+Three things happen:
+
+1. **Vercel** rebuilds (now with env vars) and deploys.
+2. **GitHub Action** links to the Supabase project and applies
+   `0001_init.sql` + `0002_storage.sql`.
+3. The two storage buckets (`gear-images`, `headshots`) exist as a
+   side effect of the migration.
+
+Watch both the Vercel deployment log and the Actions tab to confirm
+success.
+
+### 9. Bootstrap the first admin
+
+Production is empty (seeds are local-dev only). To start using it:
+
+1. Visit `https://yourdomain.com/login`.
+2. Sign in with your email; click the magic link.
+3. The `on_auth_user_created` trigger creates your `public.users` row
+   with `role = 'contributor'`.
+4. Supabase dashboard → SQL Editor, run:
+   ```sql
+   -- promote to admin
+   update public.users
+     set role = 'admin'
+     where email = 'you@example.com';
+
+   -- insert your own contributor profile (or skip and do this from /profile as admin)
+   insert into public.contributors (name, slug, show_role, role_types, display_order)
+     values ('You', 'you', 'Founder', '{on_air,crew}', 0);
+
+   -- link your user to that contributor
+   update public.users
+     set linked_contributor_id = (select id from public.contributors where slug = 'you')
+     where email = 'you@example.com';
+   ```
+5. Refresh the site — the header now shows Edit kit / Profile / Admin.
+
+### 10. Ongoing schema changes
+
+```bash
+# Write a new SQL migration
+supabase migration new add_thing
+# Edit supabase/migrations/<timestamp>_add_thing.sql
+
+# Test locally
+pnpm db:reset
+
+# Merge to main → GitHub Action applies it to production
+git push origin main
+```
+
+### Troubleshooting
+
+- **Magic link redirects to `localhost` in production** — production URL
+  missing from Supabase → Authentication → Redirect URLs.
+- **Build fails with `Missing NEXT_PUBLIC_SUPABASE_URL`** — the Vercel
+  ↔ Supabase integration didn't apply. Reinstall it, or add the three
+  envs manually in the Vercel project settings.
+- **Migration workflow fails with an auth error** — rotate
+  `SUPABASE_ACCESS_TOKEN` in Supabase account settings and update the
+  GitHub secret.
+- **Preview deploys can't sign in** — add a wildcard for your Vercel
+  team slug to Supabase Redirect URLs.
+- **"ERROR: relation 'storage.objects' doesn't exist"** during local
+  migration — make sure Supabase local is running (`pnpm db:start`) and
+  use `pnpm db:reset` rather than applying SQL files directly.
 
 ## Status of every surface
 
