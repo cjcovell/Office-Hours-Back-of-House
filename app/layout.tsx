@@ -1,6 +1,9 @@
 import type { Metadata } from "next";
+import { Toaster } from "sonner";
 
+import { FeedbackButton } from "@/components/feedback-button";
 import { SiteHeader } from "@/components/site-header";
+import { getCurrentAppUser } from "@/lib/supabase/auth";
 
 import "./globals.css";
 
@@ -13,11 +16,15 @@ export const metadata: Metadata = {
     "Gear catalog and contributor kits from the Office Hours Global team — on-air panelists and the crew who run back of house.",
 };
 
-export default function RootLayout({
+export default async function RootLayout({
   children,
 }: {
   children: React.ReactNode;
 }) {
+  // Only show the feedback button to signed-in users. RLS would reject
+  // an anonymous POST anyway, but gating the UI avoids the dead click.
+  const me = await getCurrentAppUser();
+
   return (
     <html lang="en" suppressHydrationWarning>
       <body className="min-h-screen bg-background font-sans antialiased">
@@ -33,6 +40,8 @@ export default function RootLayout({
             </p>
           </div>
         </footer>
+        {me ? <FeedbackButton /> : null}
+        <Toaster position="bottom-right" />
       </body>
     </html>
   );

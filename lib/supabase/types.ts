@@ -8,6 +8,7 @@
 export type GearStatus = "pending" | "active";
 export type RoleType = "on_air" | "crew";
 export type UserRole = "contributor" | "admin";
+export type FeedbackType = "bug" | "feature" | "general";
 
 export type SocialLinks = {
   twitter?: string;
@@ -148,6 +149,28 @@ export interface Database {
         Update: Partial<
           Database["public"]["Tables"]["admin_notifications"]["Insert"]
         >;
+        Relationships: [];
+      };
+      feedback: {
+        Row: {
+          id: string;
+          user_id: string;
+          type: FeedbackType;
+          message: string;
+          page: string | null;
+          created_at: string;
+          resolved_at: string | null;
+        };
+        Insert: {
+          id?: string;
+          user_id: string;
+          type?: FeedbackType;
+          message: string;
+          page?: string | null;
+          created_at?: string;
+          resolved_at?: string | null;
+        };
+        Update: Partial<Database["public"]["Tables"]["feedback"]["Insert"]>;
         Relationships: [];
       };
     };
