@@ -446,7 +446,9 @@ update public.users
 
 The "Auto-fill with AI" button in the kit editor + admin gear editor
 calls Vercel AI Gateway to turn a short description ("Sony FX3", "the
-black Shure dynamic mic") into structured catalog data.
+black Shure dynamic mic") into structured catalog data. The model uses
+Anthropic's built-in `web_search` tool restricted to `amazon.com` to
+also find the ASIN and product image for the canonical listing.
 
 ### Setup
 
@@ -460,29 +462,57 @@ black Shure dynamic mic") into structured catalog data.
 
 ### What it fills
 
-| Field       | AI fills? | Why / why not                                                   |
-| ----------- | --------- | --------------------------------------------------------------- |
-| Brand       | ✅         |                                                                 |
-| Name        | ✅         |                                                                 |
-| Model       | ✅         | Best effort; models occasionally guess SKUs. Admin reviews.    |
-| Category    | ✅         | Constrained to the `GEAR_CATEGORIES` enum.                      |
-| Description | ✅         | 1–2 factual sentences. System prompt bans marketing-speak.      |
-| Image       | ❌         | Text models can't produce product photography.                  |
-| ASIN        | ❌         | Models hallucinate 10-char codes; wrong ASIN breaks affiliates. |
+| Field       | AI fills? | Source                                                              |
+| ----------- | --------- | ------------------------------------------------------------------- |
+| Brand       | ✅         | LLM reasoning                                                       |
+| Name        | ✅         | LLM reasoning                                                       |
+| Model       | ✅         | LLM reasoning; best effort. Admin reviews.                          |
+| Category    | ✅         | LLM, constrained to the `GEAR_CATEGORIES` enum                      |
+| Description | ✅         | LLM; system prompt bans marketing-speak                             |
+| **ASIN**    | ✅         | Extracted from `/dp/XXXXXXXXXX` URL via `web_search` on amazon.com  |
+| **Image**   | ✅         | Product image URL from Amazon's CDN via `web_search`                |
+
+ASIN + image are **best-effort** — the prompt instructs the model to
+return null if it can't confidently identify the listing, and to
+prefer items sold by Amazon.com or the brand's own store over
+third-party resellers. Admin always reviews before flipping status to
+`active`, so wrong ASINs get caught at approval.
 
 ### Swapping the model
 
-`lib/ai/gear-enrich.ts` has a single `MODEL_ID` constant. Change to
-`openai/gpt-4o-mini`, `anthropic/claude-sonnet-4-5`, or any model the
-Gateway proxies. The structured-output schema is unchanged — the AI
-SDK handles the per-model tool-call plumbing.
+`lib/ai/gear-enrich.ts` has a single `MODEL_ID` constant
+(`anthropic/claude-sonnet-4-5`). Swap to any Claude model that
+supports the `web_search_20250305` built-in tool, or rewrite the
+integration to use a different provider's search. Sonnet 4.5 was
+chosen over Haiku 4.5 because reasoning about "which Amazon listing
+is canonical" benefits from the smarter model.
+
+### Backfilling existing catalog entries
+
+If you have gear that predates the AI lookup (or ones where the
+lookup failed), `/admin/gear` shows an **AI backfill available** card
+at the top with a **Start backfill** button. It processes every item
+missing ASIN or image, one at a time, respecting the rate limit with
+precise retry timing. Pause/resume/cancel supported. For single-item
+retry: the gear edit page has a **"Re-fetch from Amazon"** button
+that runs the same lookup using the item's current brand/name/model
+(no prompt typing).
 
 ### Cost controls
 
-- Per-user rate limit: 10 requests/min (`lib/rate-limit.ts`).
+- Per-user rate limit: 30 requests/min (`lib/rate-limit.ts`). Shared
+  bucket across kit-editor quick-add, admin re-fetch, and bulk
+  backfill.
 - Query capped at 500 chars.
-- Temperature not overridden (provider default).
-- One call per click — no streaming, no retries on client.
+- `web_search` capped at 3 uses per call via `maxUses: 3`.
+- `allowedDomains: ['amazon.com']` keeps the search focused (and
+  avoids paying for tokens on unrelated sites).
+- Admin doesn't auto-activate — gear stays `pending` until the admin
+  reviews, so wrong ASINs get caught without live affiliate links
+  pointing at the wrong product.
+
+Approximate cost per gear item at current Sonnet 4.5 pricing: $0.015–
+$0.025 including web_search. 100 backfilled items ≈ $2.
 
 If abuse becomes a concern, swap the in-memory rate limiter for
 Vercel KV / Upstash Redis.

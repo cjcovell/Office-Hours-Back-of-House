@@ -19,7 +19,9 @@ export function AdminPendingRow({
   gear: GearItemRow;
   usedByCount: number;
 }) {
-  const [asin, setAsin] = useState("");
+  // If AI pre-filled the ASIN during quick-add, show it in the input
+  // so the admin can just click Approve without re-typing.
+  const [asin, setAsin] = useState(gear.asin ?? "");
   const [error, setError] = useState<string | null>(null);
   const [isPending, startTransition] = useTransition();
 
@@ -42,13 +44,23 @@ export function AdminPendingRow({
     <Card>
       <CardContent className="space-y-4 p-5">
         <div className="flex flex-wrap items-start justify-between gap-3">
-          <div className="min-w-0">
-            <div className="text-xs uppercase tracking-wide text-muted-foreground">
-              {gear.brand}
-            </div>
-            <div className="font-semibold">{gear.name}</div>
-            <div className="text-xs text-muted-foreground">
-              {gear.model} · {formatCategory(gear.category)}
+          <div className="flex min-w-0 gap-3">
+            {gear.image_url ? (
+              // eslint-disable-next-line @next/next/no-img-element
+              <img
+                src={gear.image_url}
+                alt=""
+                className="size-14 shrink-0 rounded-md border bg-muted object-cover"
+              />
+            ) : null}
+            <div className="min-w-0">
+              <div className="text-xs uppercase tracking-wide text-muted-foreground">
+                {gear.brand}
+              </div>
+              <div className="font-semibold">{gear.name}</div>
+              <div className="text-xs text-muted-foreground">
+                {gear.model} · {formatCategory(gear.category)}
+              </div>
             </div>
           </div>
           <div className="flex items-center gap-2">
@@ -56,6 +68,11 @@ export function AdminPendingRow({
             <Badge variant="outline">
               In {usedByCount} {usedByCount === 1 ? "kit" : "kits"}
             </Badge>
+            {gear.asin ? (
+              <Badge variant="secondary" title="ASIN suggested by AI">
+                AI-suggested
+              </Badge>
+            ) : null}
           </div>
         </div>
 

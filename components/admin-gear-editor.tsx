@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useState, useTransition } from "react";
-import { AlertTriangle } from "lucide-react";
+import { AlertTriangle, RefreshCw } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
@@ -20,6 +20,7 @@ import { ImageUploader } from "@/components/image-uploader";
 import { AmazonLink } from "@/components/amazon-link";
 import {
   deleteGearAction,
+  lookupGearAmazonAction,
   updateGearAction,
 } from "@/app/admin/gear/actions";
 import { buildAmazonUrl } from "@/lib/amazon";
@@ -42,6 +43,7 @@ export function AdminGearEditor({ gear }: { gear: GearItemRow }) {
   const [success, setSuccess] = useState(false);
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [isPending, startTransition] = useTransition();
+  const [isReFetching, startReFetch] = useTransition();
 
   function handleSave(e: React.FormEvent) {
     e.preventDefault();
@@ -73,6 +75,38 @@ export function AdminGearEditor({ gear }: { gear: GearItemRow }) {
     startTransition(async () => {
       await deleteGearAction(fd);
       // action redirects to /admin/gear on success
+    });
+  }
+
+  /** One-click Amazon re-lookup using the current brand/name/model. */
+  function handleReFetch() {
+    setError(null);
+    setSuccess(false);
+    startReFetch(async () => {
+      const res = await lookupGearAmazonAction(gear.id, { force: true });
+      if ("rateLimited" in res && res.rateLimited) {
+        setError(`Rate limited — try again in ${res.retryAfterSeconds}s`);
+        return;
+      }
+      if ("error" in res && res.error) {
+        setError(res.error);
+        return;
+      }
+      if ("ok" in res && res.ok) {
+        setForm((cur) => ({
+          ...cur,
+          asin: res.asin ?? "",
+          image_url: res.imageUrl ?? "",
+        }));
+        const bits: string[] = [];
+        if (res.foundAsin) bits.push("ASIN");
+        if (res.foundImage) bits.push("image");
+        setSuccess(true);
+        if (bits.length === 0) {
+          setError("No confident match on Amazon — leaving fields unchanged.");
+          setSuccess(false);
+        }
+      }
     });
   }
 
@@ -117,6 +151,11 @@ export function AdminGearEditor({ gear }: { gear: GearItemRow }) {
                   model: s.model,
                   category: s.category,
                   description: s.description,
+                  // Only overwrite ASIN / image if the admin hasn't set them
+                  // themselves — don't clobber manually-entered data on
+                  // accidental re-runs.
+                  asin: form.asin || s.asin || "",
+                  image_url: form.image_url || s.imageUrl || "",
                 })
               }
             />
@@ -174,9 +213,23 @@ export function AdminGearEditor({ gear }: { gear: GearItemRow }) {
 
       <Card>
         <CardContent className="space-y-4 p-6">
-          <h2 className="text-lg font-semibold tracking-tight">
-            Affiliate link
-          </h2>
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <h2 className="text-lg font-semibold tracking-tight">
+              Affiliate link
+            </h2>
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              onClick={handleReFetch}
+              disabled={isReFetching || isPending}
+            >
+              <RefreshCw
+                className={isReFetching ? "size-3.5 animate-spin" : "size-3.5"}
+              />
+              {isReFetching ? "Looking up…" : "Re-fetch from Amazon"}
+            </Button>
+          </div>
           <div className="grid gap-3 sm:grid-cols-[1fr_1fr]">
             <div className="space-y-2">
               <Label htmlFor="asin">Amazon ASIN</Label>

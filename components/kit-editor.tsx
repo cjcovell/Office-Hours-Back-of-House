@@ -425,6 +425,9 @@ function CreateGearForm({
                 model: s.model,
                 category: s.category,
                 description: s.description,
+                // If AI found an image, use it; otherwise keep whatever's
+                // already attached.
+                image_url: draft.image_url || s.imageUrl || null,
               })
             }
           />

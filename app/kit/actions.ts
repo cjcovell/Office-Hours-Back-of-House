@@ -157,6 +157,10 @@ export async function quickAddGearAction(
       model: enriched.model,
       category: enriched.category,
       description: enriched.description,
+      // AI-discovered ASIN + image are persisted but gear stays 'pending'
+      // — admin still reviews/approves before anything goes live.
+      asin: enriched.asin ?? null,
+      image_url: enriched.imageUrl ?? null,
       status: "pending",
     })
     .select("id")

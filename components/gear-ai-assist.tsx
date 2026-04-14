@@ -14,6 +14,8 @@ export type GearAiSuggestion = {
   model: string;
   category: string;
   description: string;
+  asin?: string | null;
+  imageUrl?: string | null;
 };
 
 /**

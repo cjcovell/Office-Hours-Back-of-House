@@ -1,5 +1,6 @@
 import Link from "next/link";
 
+import { AdminBulkBackfill } from "@/components/admin-bulk-backfill";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent } from "@/components/ui/card";
 import { GEAR_CATEGORIES, formatCategory } from "@/lib/categories";
@@ -55,6 +56,8 @@ export default async function AdminGearListPage({
           details, replace the image, update the ASIN, or delete.
         </p>
       </header>
+
+      <AdminBulkBackfill />
 
       <div className="space-y-3">
         <div>
