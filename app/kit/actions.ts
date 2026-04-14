@@ -129,8 +129,11 @@ export async function quickAddGearAction(
     windowMs: 60_000,
   });
   if (!rl.allowed) {
+    // Structured so the client queue can reschedule precisely.
     return {
-      error: `Slow down — try again in ${rl.retryAfterSeconds}s.`,
+      error: `Rate limited — retry in ${rl.retryAfterSeconds}s`,
+      rateLimited: true as const,
+      retryAfterSeconds: rl.retryAfterSeconds,
     };
   }
 

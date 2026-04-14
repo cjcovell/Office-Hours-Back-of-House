@@ -1,7 +1,7 @@
 "use client";
 
-import { useState, useTransition } from "react";
-import { Loader2, Sparkles, Trash2 } from "lucide-react";
+import { useEffect, useState } from "react";
+import { Clock, Loader2, Sparkles, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 
 import { Badge } from "@/components/ui/badge";
@@ -20,6 +20,7 @@ import {
   suggestGearAndAddAction,
 } from "@/app/kit/actions";
 import { GEAR_CATEGORIES, formatCategory } from "@/lib/categories";
+import { cn } from "@/lib/utils";
 import type { GearItemRow, KitEntryRow } from "@/lib/supabase/types";
 
 type Entry = KitEntryRow & { gear_items: GearItemRow };
@@ -33,6 +34,20 @@ type CreateDraft = {
   image_url: string | null;
 };
 
+type QueueItem = {
+  clientId: string;
+  query: string;
+  status: "pending" | "in-flight";
+  retryCount: number;
+  nextRetryAt?: number;
+  /** True when the current pending state is because we're waiting out a
+   *  server rate-limit (vs. a transient error we're backing off from). */
+  waitingOnRateLimit: boolean;
+};
+
+const MAX_CONCURRENT = 3;
+const MAX_RETRIES = 3;
+
 export function KitEditor({
   contributorId,
   initialEntries,
@@ -41,16 +56,17 @@ export function KitEditor({
   initialEntries: Entry[];
 }) {
   const [entries, setEntries] = useState<Entry[]>(initialEntries);
+  const [queue, setQueue] = useState<QueueItem[]>([]);
   const [createDraft, setCreateDraft] = useState<CreateDraft | null>(null);
-  const [isPending, startTransition] = useTransition();
 
-  /** Add an existing gear item to the kit instantly — no intermediate form. */
+  /** Pick an existing catalog item: direct-add, no queue. The server action
+   *  is fast (one insert) so there's nothing to queue against. */
   function handlePick(gear: { id: string; name: string; brand: string }) {
     const toastId = toast.loading(`Adding ${gear.brand} ${gear.name}…`);
-    const fd = new FormData();
-    fd.set("contributorId", contributorId);
-    fd.set("gearItemId", gear.id);
-    startTransition(async () => {
+    (async () => {
+      const fd = new FormData();
+      fd.set("contributorId", contributorId);
+      fd.set("gearItemId", gear.id);
       const res = await addKitEntryAction(fd);
       if ("error" in res && res.error) {
         toast.error(res.error, { id: toastId });
@@ -58,42 +74,144 @@ export function KitEditor({
       }
       toast.success(`Added ${gear.brand} ${gear.name}`, { id: toastId });
       setEntries((cur) => [...cur, res.entry as unknown as Entry]);
-    });
+    })();
   }
 
-  /** Fast path: AI enriches the query and creates + adds in one go. */
-  function handleQuickCreate(query: string) {
-    const toastId = toast.loading(`Adding "${query}"…`);
-    startTransition(async () => {
-      const res = await quickAddGearAction(contributorId, query);
-      if ("error" in res && res.error) {
-        // AI failure → fall back to the manual form.
-        if ("fallbackQuery" in res && res.fallbackQuery) {
-          toast.error(res.error, { id: toastId });
-          setCreateDraft({
+  /** Quick-create: enqueue. Worker effect below will pick it up. */
+  function enqueueQuickCreate(query: string) {
+    setQueue((cur) => [
+      ...cur,
+      {
+        clientId: crypto.randomUUID(),
+        query,
+        status: "pending",
+        retryCount: 0,
+        waitingOnRateLimit: false,
+      },
+    ]);
+  }
+
+  /** Worker: fire up to MAX_CONCURRENT pending items at a time. */
+  useEffect(() => {
+    const now = Date.now();
+    const inFlight = queue.filter((q) => q.status === "in-flight").length;
+    const slots = MAX_CONCURRENT - inFlight;
+
+    const ready = queue
+      .filter(
+        (q) =>
+          q.status === "pending" &&
+          (!q.nextRetryAt || q.nextRetryAt <= now)
+      )
+      .slice(0, Math.max(0, slots));
+
+    if (ready.length === 0) {
+      // If items are waiting for retry, schedule a re-check at the earliest.
+      const waiting = queue
+        .filter((q) => q.status === "pending" && q.nextRetryAt && q.nextRetryAt > now)
+        .map((q) => q.nextRetryAt!);
+      if (waiting.length > 0) {
+        const delay = Math.max(100, Math.min(...waiting) - now);
+        const t = setTimeout(() => {
+          // Touching state re-runs the effect.
+          setQueue((cur) => cur.slice());
+        }, delay);
+        return () => clearTimeout(t);
+      }
+      return;
+    }
+
+    // Mark ready items in-flight.
+    const readyIds = new Set(ready.map((r) => r.clientId));
+    setQueue((cur) =>
+      cur.map((q) =>
+        readyIds.has(q.clientId) ? { ...q, status: "in-flight" } : q
+      )
+    );
+
+    for (const item of ready) {
+      void runItem(item);
+    }
+    // Only re-run when the queue changes. runItem closes over contributorId
+    // via the enclosing scope; contributorId is stable for a given session.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [queue]);
+
+  async function runItem(item: QueueItem) {
+    const res = await quickAddGearAction(contributorId, item.query);
+
+    // Server-side rate limit: requeue with precise retry time, don't count
+    // as a retry attempt.
+    if ("rateLimited" in res && res.rateLimited) {
+      const delay = Math.max(1, res.retryAfterSeconds ?? 2) * 1000;
+      setQueue((cur) =>
+        cur.map((q) =>
+          q.clientId === item.clientId
+            ? {
+                ...q,
+                status: "pending",
+                nextRetryAt: Date.now() + delay,
+                waitingOnRateLimit: true,
+              }
+            : q
+        )
+      );
+      return;
+    }
+
+    if ("error" in res && res.error) {
+      // AI enrichment failed with a fallback: open the manual form
+      // pre-filled (only if no draft is already open).
+      if ("fallbackQuery" in res && res.fallbackQuery) {
+        setQueue((cur) => cur.filter((q) => q.clientId !== item.clientId));
+        setCreateDraft((cur) =>
+          cur ?? {
             name: res.fallbackQuery,
             brand: "",
             model: "",
             category: "microphone",
             description: "",
             image_url: null,
-          });
-          return;
-        }
-        toast.error(res.error, { id: toastId });
+          }
+        );
+        toast.error(`AI couldn't handle "${item.query}" — add manually`);
         return;
       }
-      const entry = res.entry as unknown as Entry;
-      toast.success(
-        `Added ${entry.gear_items.brand} ${entry.gear_items.name}`,
-        { id: toastId }
-      );
-      setEntries((cur) => [...cur, entry]);
-    });
+
+      // Transient error: retry with exponential backoff.
+      if (item.retryCount < MAX_RETRIES) {
+        const delay = 1000 * Math.pow(2, item.retryCount);
+        setQueue((cur) =>
+          cur.map((q) =>
+            q.clientId === item.clientId
+              ? {
+                  ...q,
+                  status: "pending",
+                  retryCount: q.retryCount + 1,
+                  nextRetryAt: Date.now() + delay,
+                  waitingOnRateLimit: false,
+                }
+              : q
+          )
+        );
+        return;
+      }
+
+      // Exhausted retries.
+      setQueue((cur) => cur.filter((q) => q.clientId !== item.clientId));
+      toast.error(`"${item.query}": ${res.error}`);
+      return;
+    }
+
+    // Success.
+    const entry = res.entry as unknown as Entry;
+    setQueue((cur) => cur.filter((q) => q.clientId !== item.clientId));
+    setEntries((cur) => [...cur, entry]);
+    toast.success(
+      `Added ${entry.gear_items.brand} ${entry.gear_items.name}`
+    );
   }
 
-  /** Manual-form fallback path. Same shape as the quick path, just with
-   *  user-filled fields instead of AI-generated ones. */
   function handleSuggestNew(notes: string) {
     if (!createDraft) return;
     const fd = new FormData();
@@ -106,7 +224,7 @@ export function KitEditor({
     if (createDraft.image_url) fd.set("image_url", createDraft.image_url);
     if (notes) fd.set("notes", notes);
     const toastId = toast.loading("Saving…");
-    startTransition(async () => {
+    (async () => {
       const res = await suggestGearAndAddAction(fd);
       if ("error" in res && res.error) {
         toast.error(res.error, { id: toastId });
@@ -119,31 +237,34 @@ export function KitEditor({
       );
       setEntries((cur) => [...cur, entry]);
       setCreateDraft(null);
-    });
+    })();
   }
 
   function handleRemove(entry: Entry) {
     const fd = new FormData();
     fd.set("id", entry.id);
-    startTransition(async () => {
+    (async () => {
       const res = await removeKitEntryAction(fd);
       if ("error" in res && res.error) {
         toast.error(res.error);
         return;
       }
       setEntries((cur) => cur.filter((e) => e.id !== entry.id));
-    });
+    })();
   }
+
+  const inFlight = queue.filter((q) => q.status === "in-flight").length;
+  const queued = queue.filter((q) => q.status === "pending").length;
 
   return (
     <div className="space-y-8">
       <section className="space-y-3">
         <div className="flex items-baseline justify-between gap-2">
           <h2 className="text-lg font-semibold tracking-tight">Add gear</h2>
-          {isPending ? (
+          {queue.length > 0 ? (
             <span className="inline-flex items-center gap-1.5 text-xs text-muted-foreground">
               <Loader2 className="size-3 animate-spin" />
-              Working…
+              {inFlight} adding, {queued} queued
             </span>
           ) : null}
         </div>
@@ -154,23 +275,34 @@ export function KitEditor({
             setDraft={setCreateDraft}
             onCancel={() => setCreateDraft(null)}
             onSubmit={handleSuggestNew}
-            disabled={isPending}
           />
         ) : (
           <>
             <GearTypeahead
               onPick={handlePick}
-              onCreateNew={handleQuickCreate}
-              disabled={isPending}
+              onCreateNew={enqueueQuickCreate}
             />
             <p className="text-xs text-muted-foreground">
               <Sparkles className="mr-1 inline size-3" />
-              Pick an existing item or hit &ldquo;Quick add&rdquo; and AI
-              fills the details. Keep typing to add more.
+              Type a name and hit Enter. Keep going — items process in the
+              background.
             </p>
           </>
         )}
       </section>
+
+      {queue.length > 0 ? (
+        <section className="space-y-2">
+          <h3 className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+            Processing
+          </h3>
+          <div className="grid gap-1.5">
+            {queue.map((item) => (
+              <QueueItemRow key={item.clientId} item={item} />
+            ))}
+          </div>
+        </section>
+      ) : null}
 
       <section className="space-y-4">
         <h2 className="text-lg font-semibold tracking-tight">
@@ -210,7 +342,6 @@ export function KitEditor({
                     size="icon"
                     variant="ghost"
                     onClick={() => handleRemove(e)}
-                    disabled={isPending}
                     aria-label="Remove from kit"
                   >
                     <Trash2 className="size-4" />
@@ -225,18 +356,51 @@ export function KitEditor({
   );
 }
 
+function QueueItemRow({ item }: { item: QueueItem }) {
+  const isInFlight = item.status === "in-flight";
+  let label: string;
+  if (isInFlight) {
+    label = "adding…";
+  } else if (item.waitingOnRateLimit) {
+    const retryIn = item.nextRetryAt
+      ? Math.max(0, Math.ceil((item.nextRetryAt - Date.now()) / 1000))
+      : 0;
+    label = retryIn > 0 ? `rate-limited — retry in ${retryIn}s` : "queued";
+  } else if (item.retryCount > 0) {
+    label = `retrying (${item.retryCount}/${MAX_RETRIES})`;
+  } else {
+    label = "queued";
+  }
+  return (
+    <div
+      className={cn(
+        "flex items-center gap-2 rounded-md border border-dashed bg-muted/30 px-3 py-2 text-sm",
+        item.waitingOnRateLimit && "border-amber-500/40 bg-amber-50/40 dark:bg-amber-500/10"
+      )}
+    >
+      {isInFlight ? (
+        <Loader2 className="size-3.5 shrink-0 animate-spin text-muted-foreground" />
+      ) : (
+        <Clock className="size-3.5 shrink-0 text-muted-foreground" />
+      )}
+      <span className="truncate font-mono text-xs">{item.query}</span>
+      <span className="ml-auto shrink-0 text-xs text-muted-foreground">
+        {label}
+      </span>
+    </div>
+  );
+}
+
 function CreateGearForm({
   draft,
   setDraft,
   onCancel,
   onSubmit,
-  disabled,
 }: {
   draft: CreateDraft;
   setDraft: (d: CreateDraft) => void;
   onCancel: () => void;
   onSubmit: (notes: string) => void;
-  disabled: boolean;
 }) {
   const [notes, setNotes] = useState("");
   return (
@@ -336,19 +500,10 @@ function CreateGearForm({
           />
         </div>
         <div className="flex gap-2">
-          <Button
-            type="button"
-            onClick={() => onSubmit(notes)}
-            disabled={disabled}
-          >
+          <Button type="button" onClick={() => onSubmit(notes)}>
             Suggest gear &amp; add to kit
           </Button>
-          <Button
-            type="button"
-            variant="outline"
-            onClick={onCancel}
-            disabled={disabled}
-          >
+          <Button type="button" variant="outline" onClick={onCancel}>
             Cancel
           </Button>
         </div>

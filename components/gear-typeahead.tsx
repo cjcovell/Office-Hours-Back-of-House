@@ -18,16 +18,21 @@ type SearchResult = {
   status: GearStatus;
 };
 
+/** Loose match: every whitespace-separated token in `q` appears somewhere
+ *  in the result's combined brand + name + model (case-insensitive). Used
+ *  to decide whether Enter should pick the top result or quick-add. */
+function topResultLooseMatches(q: string, r: SearchResult): boolean {
+  const haystack = `${r.brand} ${r.name} ${r.model}`.toLowerCase();
+  const tokens = q.toLowerCase().split(/\s+/).filter(Boolean);
+  return tokens.length > 0 && tokens.every((t) => haystack.includes(t));
+}
+
 export function GearTypeahead({
   onPick,
   onCreateNew,
-  disabled = false,
 }: {
   onPick: (gear: SearchResult) => void;
   onCreateNew: (query: string) => void;
-  /** When true, the input and the dropdown buttons are disabled (e.g. a
-   *  previous add is in flight). */
-  disabled?: boolean;
 }) {
   const [q, setQ] = useState("");
   const [results, setResults] = useState<SearchResult[]>([]);
@@ -55,7 +60,7 @@ export function GearTypeahead({
           setResults([]);
         }
       });
-    }, 180);
+    }, 120);
     return () => clearTimeout(handle);
   }, [q]);
 
@@ -70,20 +75,35 @@ export function GearTypeahead({
     return () => document.removeEventListener("mousedown", onClick);
   }, []);
 
-  const showCreate =
-    q.trim().length >= 2 &&
-    !results.some(
-      (r) =>
-        `${r.brand} ${r.name}`.toLowerCase().trim() === q.toLowerCase().trim()
-    );
-
   function reset() {
     setQ("");
     setResults([]);
     setOpen(false);
-    // Keep focus so the user can type the next query immediately.
     inputRef.current?.focus();
   }
+
+  function handleKeyDown(e: React.KeyboardEvent<HTMLInputElement>) {
+    if (e.key !== "Enter") return;
+    const trimmed = q.trim();
+    if (trimmed.length < 2) return;
+    e.preventDefault();
+
+    // If the top result loosely matches the query, pick it.
+    if (results.length > 0 && topResultLooseMatches(trimmed, results[0])) {
+      onPick(results[0]);
+      reset();
+      return;
+    }
+    // Otherwise quick-add.
+    onCreateNew(trimmed);
+    reset();
+  }
+
+  const exactMatch = results.some(
+    (r) =>
+      `${r.brand} ${r.name}`.toLowerCase().trim() === q.toLowerCase().trim()
+  );
+  const showCreate = q.trim().length >= 2 && !exactMatch;
 
   return (
     <div ref={containerRef} className="relative">
@@ -97,16 +117,16 @@ export function GearTypeahead({
             setOpen(true);
           }}
           onFocus={() => setOpen(true)}
-          placeholder='Type a gear name, brand, or model — e.g. "Sony FX3", "SM7B"'
+          onKeyDown={handleKeyDown}
+          placeholder='Type a gear name, then press Enter — e.g. "Sony FX3"'
           className="pl-9"
-          disabled={disabled}
         />
         {isFetching ? (
           <Loader2 className="absolute right-3 top-1/2 size-4 -translate-y-1/2 animate-spin text-muted-foreground" />
         ) : null}
       </div>
 
-      {open && !disabled && (results.length > 0 || showCreate) ? (
+      {open && (results.length > 0 || showCreate) ? (
         <div
           className={cn(
             "absolute z-30 mt-1 w-full overflow-hidden rounded-md border bg-popover shadow-md"
@@ -152,6 +172,9 @@ export function GearTypeahead({
               >
                 <Sparkles className="size-4" />
                 Quick add: <span className="font-semibold">{q}</span>
+                <span className="ml-auto text-xs text-muted-foreground">
+                  ⏎ Enter
+                </span>
               </Button>
             </div>
           ) : null}
@@ -160,3 +183,4 @@ export function GearTypeahead({
     </div>
   );
 }
+
