@@ -1,23 +1,11 @@
-import { redirect } from "next/navigation";
-
 import { Card, CardContent } from "@/components/ui/card";
 import { AdminPendingRow } from "@/components/admin-pending-row";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
-import { getCurrentAppUser } from "@/lib/supabase/auth";
 import type { GearItemRow } from "@/lib/supabase/types";
-
-export const dynamic = "force-dynamic";
 
 export const metadata = { title: "Admin · Pending gear" };
 
-export default async function AdminPage() {
-  const me = await getCurrentAppUser();
-  if (!me) redirect("/login?next=/admin");
-
-  if (me.appUser.role !== "admin") {
-    return <NotAdmin email={me.email} />;
-  }
-
+export default async function AdminPendingPage() {
   const supabase = await createSupabaseServerClient();
   const { data: pending, error } = await supabase
     .from("gear_items")
@@ -35,7 +23,7 @@ export default async function AdminPage() {
   const rows = (pending ?? []) as unknown as Row[];
 
   return (
-    <div className="space-y-8">
+    <div className="space-y-6">
       <header className="space-y-2">
         <h1 className="text-3xl font-semibold tracking-tight">
           Pending gear queue
@@ -64,21 +52,6 @@ export default async function AdminPage() {
           ))}
         </div>
       )}
-    </div>
-  );
-}
-
-function NotAdmin({ email }: { email: string }) {
-  return (
-    <div className="mx-auto max-w-xl space-y-4">
-      <h1 className="text-2xl font-semibold tracking-tight">Admin only</h1>
-      <p className="text-muted-foreground">
-        You&rsquo;re signed in as <strong>{email}</strong> but don&rsquo;t
-        have the admin role. Promote yourself in SQL:
-      </p>
-      <pre className="overflow-x-auto rounded-md bg-muted px-3 py-2 text-xs">
-        {`update public.users set role = 'admin' where email = '${email}';`}
-      </pre>
     </div>
   );
 }
