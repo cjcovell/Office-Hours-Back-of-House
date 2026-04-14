@@ -4,6 +4,11 @@ import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
 
 import { lookupAmazonDetails } from "@/lib/ai/gear-enrich";
+import {
+  isAmazonImageUrl,
+  verifyAsinExists,
+  verifyImageUrl,
+} from "@/lib/amazon-verify";
 import { rateLimit } from "@/lib/rate-limit";
 import { createSupabaseAdminClient } from "@/lib/supabase/admin";
 import { getCurrentAppUser } from "@/lib/supabase/auth";
@@ -175,6 +180,108 @@ export async function lookupGearAmazonAction(
     imageUrl: update.image_url ?? gear.image_url,
     foundAsin: !!lookup.asin,
     foundImage: !!lookup.imageUrl,
+  };
+}
+
+/**
+ * Verify an existing gear item's ASIN and (Amazon-CDN) image URL.
+ *
+ * Behavior:
+ *  - If ASIN fails to resolve on amazon.com → clear asin AND image_url
+ *    (they came from the same AI response, so the image is suspect).
+ *  - If ASIN is valid but the image URL fails (and it's from Amazon's
+ *    CDN) → clear just the image_url. Leave the ASIN.
+ *  - Supabase-hosted image URLs are trusted and never cleared here —
+ *    an admin uploaded them explicitly.
+ *
+ * Used by the bulk "Verify existing" button to clean up rows where AI
+ * hallucinated ASINs and/or images before proper verification was in
+ * place.
+ */
+export async function verifyGearAsinAction(gearId: string) {
+  const me = await getCurrentAppUser();
+  if (!me || me.appUser.role !== "admin") {
+    return { error: "Forbidden" as const };
+  }
+  if (!gearId) return { error: "Missing gearId" as const };
+
+  // Rate limiting here is purely courtesy to Amazon — no AI call is made.
+  // Using a different bucket so it doesn't compete with AI enrichment.
+  const rl = rateLimit(me.authId, "asin-verify", {
+    maxRequests: 60,
+    windowMs: 60_000,
+  });
+  if (!rl.allowed) {
+    return {
+      error: "Rate limited",
+      rateLimited: true as const,
+      retryAfterSeconds: rl.retryAfterSeconds,
+    };
+  }
+
+  const client = createSupabaseAdminClient();
+  const { data: gear, error: readErr } = await client
+    .from("gear_items")
+    .select("id, asin, image_url")
+    .eq("id", gearId)
+    .maybeSingle();
+  if (readErr) return { error: readErr.message };
+  if (!gear) return { error: "Gear not found" };
+
+  if (!gear.asin && !gear.image_url) {
+    return { ok: true as const, valid: null, reason: "nothing to verify" };
+  }
+
+  // Only verify image URL if it's on Amazon's CDN. Supabase storage
+  // URLs are admin-uploaded and we trust them.
+  const shouldVerifyImage =
+    !!gear.image_url && isAmazonImageUrl(gear.image_url);
+
+  const [asinVerdict, imageVerdict] = await Promise.all([
+    gear.asin
+      ? verifyAsinExists(gear.asin)
+      : Promise.resolve({ ok: true as const }),
+    shouldVerifyImage
+      ? verifyImageUrl(gear.image_url!)
+      : Promise.resolve({ ok: true as const }),
+  ]);
+
+  const update: { asin?: null; image_url?: null } = {};
+  const reasons: string[] = [];
+  let clearedAsin: string | null = null;
+
+  if (gear.asin && !asinVerdict.ok) {
+    update.asin = null;
+    update.image_url = null; // coupled clear — same AI response
+    clearedAsin = gear.asin;
+    reasons.push(
+      `asin: ${"reason" in asinVerdict ? asinVerdict.reason : "invalid"}`
+    );
+  } else if (shouldVerifyImage && !imageVerdict.ok) {
+    update.image_url = null;
+    reasons.push(
+      `image: ${"reason" in imageVerdict ? imageVerdict.reason : "invalid"}`
+    );
+  }
+
+  if (Object.keys(update).length === 0) {
+    return { ok: true as const, valid: true as const };
+  }
+
+  const { error: writeErr } = await client
+    .from("gear_items")
+    .update(update)
+    .eq("id", gearId);
+  if (writeErr) return { error: writeErr.message };
+
+  revalidatePath("/admin/gear");
+  revalidatePath(`/admin/gear/${gearId}`);
+
+  return {
+    ok: true as const,
+    valid: false as const,
+    reason: reasons.join("; "),
+    clearedAsin,
   };
 }
 

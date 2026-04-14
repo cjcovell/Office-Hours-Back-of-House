@@ -3,6 +3,7 @@ import { anthropic } from "@ai-sdk/anthropic";
 import { gateway } from "@ai-sdk/gateway";
 import { z } from "zod";
 
+import { verifyAsinExists, verifyImageUrl } from "@/lib/amazon-verify";
 import { GEAR_CATEGORIES } from "@/lib/categories";
 
 /**
@@ -166,7 +167,9 @@ export async function lookupAmazonDetails(params: {
     experimental_output: Output.object({ schema: amazonLookupSchema }),
   });
 
-  return result.experimental_output as AmazonLookupResult;
+  const raw = result.experimental_output as AmazonLookupResult;
+  logToolDiagnostics("lookupAmazonDetails", result, { brand, name, model });
+  return await verifyAndCleanAsin(raw, `${brand} ${name} ${model}`);
 }
 
 // ---------- Full enrichment (user-query path) -------------------------------
@@ -191,5 +194,92 @@ export async function enrichGearFromQuery(
     experimental_output: Output.object({ schema: gearEnrichSchema }),
   });
 
-  return result.experimental_output as GearEnrichResult;
+  const raw = result.experimental_output as GearEnrichResult;
+  logToolDiagnostics("enrichGearFromQuery", result, { query: trimmed });
+
+  // Verify the AI's ASIN actually resolves on Amazon. If not, null it
+  // out (along with imageUrl — if the product page doesn't exist, the
+  // image URL is probably from a different product).
+  const cleaned = await verifyAndCleanAsin(
+    { asin: raw.asin, imageUrl: raw.imageUrl },
+    trimmed
+  );
+  return { ...raw, asin: cleaned.asin, imageUrl: cleaned.imageUrl };
+}
+
+// ---------- Verification + diagnostics --------------------------------------
+
+/**
+ * Run the AI's proposed ASIN and image URL through real HTTP checks.
+ * Discards ASINs that 404 on amazon.com and image URLs that don't
+ * resolve to a real image.
+ *
+ * Coupling rule: if the ASIN fails, we also null out the image — they
+ * came from the same AI response, so a hallucinated ASIN implies a
+ * hallucinated image. If only the image fails (ASIN valid), we keep
+ * the ASIN.
+ *
+ * Runs verifies in parallel. Adds ~1-2s per call; worth it to avoid
+ * saving garbage that gives users broken affiliate links and blue-?
+ * image placeholders.
+ */
+async function verifyAndCleanAsin<
+  T extends { asin: string | null; imageUrl: string | null },
+>(result: T, context: string): Promise<T> {
+  if (!result.asin && !result.imageUrl) return result;
+
+  const [asinVerdict, imageVerdict] = await Promise.all([
+    result.asin
+      ? verifyAsinExists(result.asin)
+      : Promise.resolve({ ok: true as const }),
+    result.imageUrl
+      ? verifyImageUrl(result.imageUrl)
+      : Promise.resolve({ ok: true as const }),
+  ]);
+
+  let asin = result.asin;
+  let imageUrl = result.imageUrl;
+
+  if (result.asin && !asinVerdict.ok) {
+    console.warn(
+      `[gear-enrich] Discarding unverifiable ASIN ${result.asin} for "${context}": ${"reason" in asinVerdict ? asinVerdict.reason : ""} (also clearing image — same AI response)`
+    );
+    asin = null;
+    imageUrl = null;
+  } else if (result.imageUrl && !imageVerdict.ok) {
+    console.warn(
+      `[gear-enrich] Discarding unverifiable image ${result.imageUrl} for "${context}": ${"reason" in imageVerdict ? imageVerdict.reason : ""}`
+    );
+    imageUrl = null;
+  }
+
+  return { ...result, asin, imageUrl };
+}
+
+/**
+ * Log whether the model actually invoked web_search. Shows up in Vercel
+ * function logs. If we see "[gear-enrich] 0 web_search calls" on most
+ * requests, the Gateway isn't proxying the Anthropic built-in tool and
+ * we need to switch to the direct @ai-sdk/anthropic provider for this
+ * path.
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function logToolDiagnostics(fn: string, result: any, ctx: Record<string, string>) {
+  // Walk through steps and count tool calls. The parameterized type of
+  // generateText's return depends on the tool set; we don't care about
+  // the type here, just the call-count signal, so `any` is fine.
+  const steps = (result.steps ?? []) as Array<{
+    toolCalls?: Array<{ toolName: string }>;
+  }>;
+  const searchCalls = steps.flatMap((step) =>
+    (step.toolCalls ?? []).filter((tc) => tc.toolName === "web_search")
+  );
+
+  const ctxStr = Object.entries(ctx)
+    .map(([k, v]) => `${k}=${JSON.stringify(v)}`)
+    .join(" ");
+
+  console.info(
+    `[gear-enrich] ${fn}: ${searchCalls.length} web_search calls · ${steps.length} steps · ${ctxStr}`
+  );
 }
