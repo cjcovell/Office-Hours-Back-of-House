@@ -1,3 +1,5 @@
+import { redirect } from "next/navigation";
+
 import { Card, CardContent } from "@/components/ui/card";
 import { AdminPendingRow } from "@/components/admin-pending-row";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
@@ -8,18 +10,15 @@ export const dynamic = "force-dynamic";
 
 export const metadata = { title: "Admin · Pending gear" };
 
-/**
- * Admin pending-gear queue — STUB.
- * RLS enforces that only users with role='admin' can update gear_items.
- * Until the magic-link sign-in flow is wired, viewing this page works for
- * everyone, but the approve action only succeeds for admins.
- */
 export default async function AdminPage() {
   const me = await getCurrentAppUser();
-  const supabase = await createSupabaseServerClient();
+  if (!me) redirect("/login?next=/admin");
 
-  // Pending gear with a count of how many kits reference it (so admins know
-  // which approvals unlock the most affiliate revenue first).
+  if (me.appUser.role !== "admin") {
+    return <NotAdmin email={me.email} />;
+  }
+
+  const supabase = await createSupabaseServerClient();
   const { data: pending, error } = await supabase
     .from("gear_items")
     .select("*, kit_entries(count)")
@@ -48,10 +47,6 @@ export default async function AdminPage() {
         </p>
       </header>
 
-      {!me || me.appUser.role !== "admin" ? (
-        <AuthStubBanner role={me?.appUser.role ?? "anonymous"} />
-      ) : null}
-
       {rows.length === 0 ? (
         <Card>
           <CardContent className="p-6 text-sm text-muted-foreground">
@@ -73,17 +68,16 @@ export default async function AdminPage() {
   );
 }
 
-function AuthStubBanner({ role }: { role: string }) {
+function NotAdmin({ email }: { email: string }) {
   return (
-    <div className="rounded-md border border-dashed border-amber-400/40 bg-amber-50/40 px-4 py-3 text-sm text-amber-900 dark:bg-amber-500/10 dark:text-amber-200">
-      <strong>Auth stub.</strong> You&rsquo;re currently{" "}
-      <code className="rounded bg-amber-100/60 px-1 dark:bg-amber-500/20">
-        {role}
-      </code>
-      . The approve action requires <code>role = &lsquo;admin&rsquo;</code> on
-      your <code>public.users</code> row. Promote yourself in SQL with:
-      <pre className="mt-2 overflow-x-auto rounded bg-amber-100/40 px-2 py-1 text-xs dark:bg-amber-500/10">
-        {`update public.users set role = 'admin' where email = 'you@example.com';`}
+    <div className="mx-auto max-w-xl space-y-4">
+      <h1 className="text-2xl font-semibold tracking-tight">Admin only</h1>
+      <p className="text-muted-foreground">
+        You&rsquo;re signed in as <strong>{email}</strong> but don&rsquo;t
+        have the admin role. Promote yourself in SQL:
+      </p>
+      <pre className="overflow-x-auto rounded-md bg-muted px-3 py-2 text-xs">
+        {`update public.users set role = 'admin' where email = '${email}';`}
       </pre>
     </div>
   );

@@ -30,15 +30,20 @@ app/
   contributors/page.tsx        Index with On Air / Crew filter tabs
   contributors/[slug]/page.tsx Contributor kit page
   gear/page.tsx                Browsable, category-filterable catalog
-  gear/[id]/page.tsx           Gear detail + "Also used by"
-  kit/page.tsx                 Contributor kit editor (STUB — see Auth)
+  gear/[id]/page.tsx           Gear detail + hero image + "Also used by"
+  kit/page.tsx                 Contributor kit editor (auth-required)
   kit/actions.ts               Server actions: add / suggest / remove kit entries
-  admin/page.tsx               Pending-gear queue (STUB — see Auth)
+  admin/page.tsx               Pending-gear queue (admin-only)
   admin/actions.ts             Server actions: approve gear, edit details
+  profile/page.tsx             Contributor profile editor (auth-required)
+  profile/actions.ts           Server action: update contributor profile
+  login/page.tsx               Magic-link sign-in form
+  login/actions.ts             sendMagicLink + signOut server actions
+  auth/callback/route.ts       OAuth code -> session exchange
   api/gear/search/route.ts     Typeahead endpoint for the kit editor
 components/
   ui/                          shadcn primitives
-  site-header.tsx
+  site-header.tsx              Async, role-aware nav (Sign in / email + Sign out)
   contributor-card.tsx         On-air / crew cards on the index
   gear-card.tsx
   role-badge.tsx               On Air / Back of House pills
@@ -46,6 +51,8 @@ components/
   gear-typeahead.tsx           Debounced search + "Create new gear" CTA
   kit-editor.tsx               Client-side editor used by /kit
   admin-pending-row.tsx        One row of the admin queue
+  image-uploader.tsx           Reusable Supabase Storage uploader
+  profile-editor.tsx           Client-side editor used by /profile
 lib/
   utils.ts                     cn() helper
   amazon.ts                    buildAmazonUrl(asin) -> tag-suffixed URL
@@ -59,7 +66,8 @@ lib/
 middleware.ts                  Refreshes Supabase auth session cookies
 supabase/
   config.toml                  Local Supabase CLI config
-  migrations/0001_init.sql     Schema, triggers, RLS policies
+  migrations/0001_init.sql     Core schema, triggers, RLS policies
+  migrations/0002_storage.sql  gear-images + headshots buckets + storage RLS
   seed.sql                     Placeholder contributors + ~24 gear items
 ```
 
@@ -167,40 +175,68 @@ pnpm db:types
 Then swap the import in `lib/supabase/{server,client,admin}.ts` to point
 at the generated file and delete the hand-written `types.ts`.
 
-## What's stubbed vs. wired
+## Status of every surface
 
-| Surface                                  | Status                                                                |
-| ---------------------------------------- | --------------------------------------------------------------------- |
-| Public contributor pages                 | **Fully wired.** Reads via `supabase-js`, RLS allows anonymous reads. |
-| Public gear catalog                      | **Fully wired.** Filters by `?category=`, only shows `status='active'`. |
-| Typeahead search                         | **Fully wired.** `/api/gear/search?q=...` with ILIKE.                 |
-| Suggest new gear                         | Server action wired; will succeed once a contributor is signed in.    |
-| Admin approve gear                       | Server action wired; will succeed once an admin is signed in.         |
-| Magic-link sign-in                       | **Not wired** yet. Stub banners on `/kit` and `/admin` explain how.   |
-| Storage uploads (headshots, gear images) | Schema has `headshot_url` / `image_url` text fields; no upload UI yet. Buckets named in `.env.example`. |
+| Surface                  | Status                                                                                       |
+| ------------------------ | -------------------------------------------------------------------------------------------- |
+| Public contributor pages | **Wired.** Anonymous reads via RLS.                                                          |
+| Public gear catalog      | **Wired.** `?category=` filter, only shows `status='active'`.                                |
+| Typeahead search         | **Wired.** `/api/gear/search?q=...` with ILIKE.                                              |
+| Magic-link sign-in       | **Wired.** `/login` sends, `/auth/callback` exchanges, header shows email + Sign out.        |
+| Suggest new gear         | **Wired.** Includes optional product image upload (5MB cap, gear-images bucket).             |
+| Admin approve gear       | **Wired.** RLS-enforced; non-admins see a "promote yourself" message.                        |
+| Profile editor           | **Wired.** `/profile`. Headshot upload to headshots bucket (path-locked to contributor id).  |
+| Gear hero image          | **Wired.** Renders on `/gear/[id]` when `image_url` is set.                                  |
+| Admin contributor picker | **Wired.** Admins land on `/kit` or `/profile` and pick which contributor to act as via `?as=<slug>`. |
 
-## Wiring up auth (next step)
+## Auth flow
 
-The data layer enforces everything via RLS, so when you wire auth you
-mostly need to:
+1. User visits a protected page (`/kit`, `/admin`, `/profile`) or clicks
+   **Sign in** in the header → routed to `/login?next=<wherever>`.
+2. They submit their email → `sendMagicLinkAction` calls
+   `supabase.auth.signInWithOtp` with `emailRedirectTo` pointing at
+   `/auth/callback?next=<dest>`. The page swaps to a "Check your email"
+   state.
+3. They click the link in the email (locally, find it in Supabase's
+   built-in Inbucket at `http://127.0.0.1:54324`) → `/auth/callback?code=...`.
+4. The route handler calls `exchangeCodeForSession`, sets cookies via
+   `@supabase/ssr`, and redirects to the original destination.
+5. On every subsequent request, `middleware.ts` refreshes the session
+   cookie. The async `<SiteHeader />` reads the user via
+   `getCurrentAppUser` and conditionally renders the right nav links.
 
-1. Add a `/login` page using Supabase magic-link sign-in (`signInWithOtp`).
-2. Add a `/auth/callback` route (set as the redirect URL in Supabase).
-3. Promote yourself to admin in SQL:
-   ```sql
-   update public.users set role = 'admin' where email = 'you@example.com';
-   ```
-4. Link a contributor row to your user:
-   ```sql
-   update public.users
-     set linked_contributor_id = (select id from public.contributors where slug = 'your-slug')
-     where email = 'you@example.com';
-   ```
-5. Delete the `?as=<slug>` demo path in `app/kit/page.tsx`.
+### One-time setup for the first admin
 
-Everything the kit editor and admin queue do is already RLS-checked, so
-you don't need to add app-level authorization — the database will reject
-forbidden writes.
+Sign in once with your email so a `public.users` row is created (the
+`on_auth_user_created` trigger handles this). Then in SQL:
+
+```sql
+-- promote to admin
+update public.users
+  set role = 'admin'
+  where email = 'you@example.com';
+
+-- link to a contributor profile (so /kit and /profile target it by default)
+update public.users
+  set linked_contributor_id = (select id from public.contributors where slug = 'your-slug')
+  where email = 'you@example.com';
+```
+
+## Storage
+
+Two public buckets, both created by `supabase/migrations/0002_storage.sql`:
+
+| Bucket        | Used by              | Path convention             | Write policy                                                                                |
+| ------------- | -------------------- | --------------------------- | ------------------------------------------------------------------------------------------- |
+| `gear-images` | "Create new gear" UI | `{uuid}-{filename}`         | Any authenticated user can upload. Owner or admin can update/delete.                        |
+| `headshots`   | Profile editor       | `{contributorId}/{uuid}-…`  | The linked user (path prefix must equal their `linked_contributor_id`) or admin can upload. |
+
+Both buckets are public read so the public site renders them directly via
+plain `<img>` tags. The Supabase URL pattern (`*.supabase.co/storage/v1/object/public/...`)
+is already allowlisted in `next.config.ts` for `next/image` if you switch
+later. Max upload is 5 MB enforced client-side in `<ImageUploader>`; the
+Supabase project enforces its own limit in `config.toml` (50 MiB by
+default).
 
 ## Scripts
 

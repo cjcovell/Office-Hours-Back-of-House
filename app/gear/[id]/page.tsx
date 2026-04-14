@@ -55,26 +55,38 @@ export default async function GearDetailPage({
 
   return (
     <article className="space-y-10">
-      <header className="space-y-3">
-        <div className="text-xs uppercase tracking-wide text-muted-foreground">
-          {gear.brand}
-        </div>
-        <div className="flex flex-wrap items-center gap-3">
-          <h1 className="text-3xl font-semibold tracking-tight">{gear.name}</h1>
-          {gear.status === "pending" ? (
-            <Badge variant="muted">Pending affiliate link</Badge>
+      <header className="grid gap-6 sm:grid-cols-[auto_1fr] sm:items-start">
+        {gear.image_url ? (
+          // eslint-disable-next-line @next/next/no-img-element
+          <img
+            src={gear.image_url}
+            alt={`${gear.brand} ${gear.name}`}
+            className="size-40 shrink-0 rounded-xl border bg-muted object-cover sm:size-48"
+          />
+        ) : null}
+        <div className="space-y-3">
+          <div className="text-xs uppercase tracking-wide text-muted-foreground">
+            {gear.brand}
+          </div>
+          <div className="flex flex-wrap items-center gap-3">
+            <h1 className="text-3xl font-semibold tracking-tight">
+              {gear.name}
+            </h1>
+            {gear.status === "pending" ? (
+              <Badge variant="muted">Pending affiliate link</Badge>
+            ) : null}
+          </div>
+          <div className="text-base text-muted-foreground">{gear.model}</div>
+          <div className="flex flex-wrap items-center gap-2">
+            <Badge variant="outline">{formatCategory(gear.category)}</Badge>
+            <AmazonLink asin={gear.asin} size="default" />
+          </div>
+          {gear.description ? (
+            <p className="max-w-prose text-pretty text-muted-foreground">
+              {gear.description}
+            </p>
           ) : null}
         </div>
-        <div className="text-base text-muted-foreground">{gear.model}</div>
-        <div className="flex flex-wrap items-center gap-2">
-          <Badge variant="outline">{formatCategory(gear.category)}</Badge>
-          <AmazonLink asin={gear.asin} size="default" />
-        </div>
-        {gear.description ? (
-          <p className="max-w-prose text-pretty text-muted-foreground">
-            {gear.description}
-          </p>
-        ) : null}
       </header>
 
       <Separator />

@@ -10,6 +10,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { GearTypeahead } from "@/components/gear-typeahead";
+import { ImageUploader } from "@/components/image-uploader";
 import {
   addKitEntryAction,
   removeKitEntryAction,
@@ -39,6 +40,7 @@ export function KitEditor({
     brand: string;
     model: string;
     category: string;
+    image_url: string | null;
   } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [isPending, startTransition] = useTransition();
@@ -68,6 +70,7 @@ export function KitEditor({
     fd.set("brand", createDraft.brand);
     fd.set("model", createDraft.model);
     fd.set("category", createDraft.category);
+    if (createDraft.image_url) fd.set("image_url", createDraft.image_url);
     if (notes) fd.set("notes", notes);
     startTransition(async () => {
       const res = await suggestGearAndAddAction(fd);
@@ -135,6 +138,7 @@ export function KitEditor({
                 brand: "",
                 model: "",
                 category: "microphone",
+                image_url: null,
               })
             }
           />
@@ -254,7 +258,13 @@ function CreateGearForm({
   onSubmit,
   disabled,
 }: {
-  draft: { name: string; brand: string; model: string; category: string };
+  draft: {
+    name: string;
+    brand: string;
+    model: string;
+    category: string;
+    image_url: string | null;
+  };
   setDraft: (d: typeof draft) => void;
   onCancel: () => void;
   onSubmit: (notes: string) => void;
@@ -268,36 +278,54 @@ function CreateGearForm({
           New gear is saved as <Badge variant="muted">Pending</Badge> until an
           admin adds the affiliate link.
         </p>
-        <div className="grid gap-3 sm:grid-cols-2">
-          <Field
-            label="Brand"
-            value={draft.brand}
-            onChange={(v) => setDraft({ ...draft, brand: v })}
-          />
-          <Field
-            label="Name"
-            value={draft.name}
-            onChange={(v) => setDraft({ ...draft, name: v })}
-          />
-          <Field
-            label="Model"
-            value={draft.model}
-            onChange={(v) => setDraft({ ...draft, model: v })}
-          />
+        <div className="flex flex-col gap-4 sm:flex-row sm:items-start">
+          <div className="flex-1 space-y-3">
+            <div className="grid gap-3 sm:grid-cols-2">
+              <Field
+                label="Brand"
+                value={draft.brand}
+                onChange={(v) => setDraft({ ...draft, brand: v })}
+              />
+              <Field
+                label="Name"
+                value={draft.name}
+                onChange={(v) => setDraft({ ...draft, name: v })}
+              />
+              <Field
+                label="Model"
+                value={draft.model}
+                onChange={(v) => setDraft({ ...draft, model: v })}
+              />
+              <div className="space-y-2">
+                <Label htmlFor="category">Category</Label>
+                <select
+                  id="category"
+                  value={draft.category}
+                  onChange={(e) =>
+                    setDraft({ ...draft, category: e.target.value })
+                  }
+                  className="flex h-9 w-full rounded-md border border-input bg-background px-3 py-1 text-sm shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                >
+                  {GEAR_CATEGORIES.map((c) => (
+                    <option key={c} value={c}>
+                      {formatCategory(c)}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            </div>
+          </div>
           <div className="space-y-2">
-            <Label htmlFor="category">Category</Label>
-            <select
-              id="category"
-              value={draft.category}
-              onChange={(e) => setDraft({ ...draft, category: e.target.value })}
-              className="flex h-9 w-full rounded-md border border-input bg-background px-3 py-1 text-sm shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-            >
-              {GEAR_CATEGORIES.map((c) => (
-                <option key={c} value={c}>
-                  {formatCategory(c)}
-                </option>
-              ))}
-            </select>
+            <Label>Product image (optional)</Label>
+            <ImageUploader
+              bucket="gear-images"
+              currentUrl={draft.image_url}
+              onUploaded={(url) =>
+                setDraft({ ...draft, image_url: url || null })
+              }
+              aspect="square"
+              label="Add image"
+            />
           </div>
         </div>
         <div className="space-y-2">

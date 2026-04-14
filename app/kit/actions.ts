@@ -50,6 +50,8 @@ export async function suggestGearAndAddAction(formData: FormData) {
   const model = String(formData.get("model") ?? "").trim();
   const category = String(formData.get("category") ?? "").trim();
   const notes = (formData.get("notes") as string | null) || null;
+  const imageUrl =
+    (String(formData.get("image_url") ?? "").trim() || null) as string | null;
 
   if (!contributorId || !name || !brand || !model || !category) {
     return { error: "Name, brand, model, and category are required" };
@@ -62,7 +64,14 @@ export async function suggestGearAndAddAction(formData: FormData) {
 
   const { data: gear, error: gearErr } = await supabase
     .from("gear_items")
-    .insert({ name, brand, model, category, status: "pending" })
+    .insert({
+      name,
+      brand,
+      model,
+      category,
+      status: "pending",
+      image_url: imageUrl,
+    })
     .select("id")
     .single();
 
