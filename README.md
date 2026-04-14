@@ -360,7 +360,8 @@ git push origin main
 | Public contributor pages | **Wired.** Anonymous reads via RLS.                                                          |
 | Public gear catalog      | **Wired.** `?category=` filter, only shows `status='active'`.                                |
 | Typeahead search         | **Wired.** `/api/gear/search?q=...` with ILIKE.                                              |
-| OTP-code sign-in         | **Wired.** `/login` sends a 6-digit code; second step verifies. No magic links, no prefetch traps. |
+| OTP-code sign-in         | **Wired.** `/login` has Password + Email-code tabs; code tab sends a 6-digit OTP to verify in-form. |
+| Password sign-in         | **Wired.** Email + password via `signInWithPassword`. Create users via Supabase dashboard → Auth → Users → Add user (with Auto Confirm checked). |
 | Suggest new gear         | **Wired.** Includes optional product image upload (5MB cap, gear-images bucket).             |
 | Admin approve gear       | **Wired.** RLS-enforced; non-admins see a "promote yourself" message.                        |
 | Profile editor           | **Wired.** `/profile`. Headshot upload to headshots bucket (path-locked to contributor id).  |
@@ -369,27 +370,41 @@ git push origin main
 
 ## Auth flow
 
+`/login` has two tabs: **Password** (default) and **Email code**.
+
+### Password sign-in
+
+1. Admin creates the user via Supabase dashboard → Authentication →
+   Users → **Add user** → enter email + password → check
+   **Auto Confirm User** → **Create user**. This skips the email-
+   verification round-trip so the user can sign in immediately.
+2. User visits `/login`, enters email + password → server action calls
+   `supabase.auth.signInWithPassword`. Session cookie is set; redirect
+   to `next`.
+
+### OTP code sign-in
+
 We use OTP codes (the 6-digit-code-by-email flow) rather than magic
 links. Email client prefetchers (Gmail, Outlook, corporate security
 scanners) will "preview" links to screen for phishing, which consumes
 the one-time token before the user ever clicks. Codes typed by hand
 can't be prefetched.
 
-1. User visits a protected page (`/kit`, `/admin`, `/profile`) or
-   clicks **Sign in** in the header → routed to `/login?next=<wherever>`.
-2. They submit their email → `sendOtpCodeAction` calls
+1. User visits `/login` → switches to the **Email code** tab, enters
+   email → `sendOtpCodeAction` calls
    `supabase.auth.signInWithOtp({ email })` **without** an
    `emailRedirectTo` — that omission is what tells Supabase to send a
    code instead of a magic link. Supabase emails the 6-digit code.
-3. `/login` swaps to the verify step (`?step=verify&email=...&next=...`)
+2. `/login` swaps to the verify step (`?step=verify&email=...&next=...`)
    and prompts for the code.
-4. User types the code → `verifyOtpCodeAction` calls
+3. User types the code → `verifyOtpCodeAction` calls
    `supabase.auth.verifyOtp({ email, token, type: 'email' })`. On
    success the session cookie is set by `@supabase/ssr` and the user
    is redirected to `next`.
-5. On every subsequent request, `middleware.ts` refreshes the session
-   cookie. The async `<SiteHeader />` reads the user via
-   `getCurrentAppUser` and conditionally renders the right nav links.
+
+On every subsequent request, `middleware.ts` refreshes the session
+cookie. The async `<SiteHeader />` reads the user via
+`getCurrentAppUser` and conditionally renders the right nav links.
 
 ### Email template (production)
 

@@ -7,6 +7,33 @@ import { createSupabaseServerClient } from "@/lib/supabase/server";
 const EMAIL_RE = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
 
 /**
+ * Email + password sign-in. Primary method once an admin has created
+ * the user in Supabase dashboard (with Auto Confirm set so no
+ * email-verification round-trip is required).
+ */
+export async function signInWithPasswordAction(formData: FormData) {
+  const email = String(formData.get("email") ?? "").trim().toLowerCase();
+  const password = String(formData.get("password") ?? "");
+  const next = String(formData.get("next") ?? "/");
+
+  const backToPassword = (msg: string) =>
+    redirect(
+      `/login?method=password&error=${encodeURIComponent(msg)}&next=${encodeURIComponent(next)}`
+    );
+
+  if (!email || !EMAIL_RE.test(email)) backToPassword("Enter a valid email address");
+  if (!password) backToPassword("Enter your password");
+
+  const supabase = await createSupabaseServerClient();
+  const { error } = await supabase.auth.signInWithPassword({ email, password });
+
+  if (error) backToPassword(error.message);
+
+  const safeNext = next.startsWith("/") ? next : "/";
+  redirect(safeNext);
+}
+
+/**
  * Send a 6-digit OTP code to the user's email. We deliberately omit
  * `emailRedirectTo` here — that flag is what turns a Supabase OTP into
  * a magic link. Without it, the email contains a typeable code.
@@ -21,7 +48,7 @@ export async function sendOtpCodeAction(formData: FormData) {
 
   if (!email || !EMAIL_RE.test(email)) {
     redirect(
-      `/login?error=${encodeURIComponent("Enter a valid email address")}&next=${encodeURIComponent(next)}`
+      `/login?method=code&error=${encodeURIComponent("Enter a valid email address")}&next=${encodeURIComponent(next)}`
     );
   }
 
@@ -30,7 +57,7 @@ export async function sendOtpCodeAction(formData: FormData) {
 
   if (error) {
     redirect(
-      `/login?error=${encodeURIComponent(error.message)}&next=${encodeURIComponent(next)}`
+      `/login?method=code&error=${encodeURIComponent(error.message)}&next=${encodeURIComponent(next)}`
     );
   }
 

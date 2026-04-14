@@ -4,14 +4,20 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 
-import { sendOtpCodeAction, verifyOtpCodeAction } from "./actions";
+import {
+  sendOtpCodeAction,
+  signInWithPasswordAction,
+  verifyOtpCodeAction,
+} from "./actions";
 
 export const dynamic = "force-dynamic";
 export const metadata = { title: "Sign in" };
 
 type SearchParams = {
-  step?: string;
+  method?: string; // "password" | "code"
+  step?: string; // "verify"
   email?: string;
   error?: string;
   next?: string;
@@ -22,17 +28,15 @@ export default async function LoginPage({
 }: {
   searchParams: Promise<SearchParams>;
 }) {
-  const { step, email, error, next } = await searchParams;
+  const { method, step, email, error, next } = await searchParams;
   const safeNext = next ?? "/";
 
   if (step === "verify" && email) {
     return <VerifyForm email={email} next={safeNext} error={error} />;
   }
 
-  return <EmailForm next={safeNext} error={error} />;
-}
+  const defaultTab: "password" | "code" = method === "code" ? "code" : "password";
 
-function EmailForm({ next, error }: { next: string; error?: string }) {
   return (
     <div className="mx-auto max-w-md">
       <Card>
@@ -40,30 +44,75 @@ function EmailForm({ next, error }: { next: string; error?: string }) {
           <div className="space-y-1">
             <h1 className="text-xl font-semibold tracking-tight">Sign in</h1>
             <p className="text-sm text-muted-foreground">
-              We&rsquo;ll email you a six-digit code &mdash; no password,
-              no link to click.
+              Pick your preferred method.
             </p>
           </div>
 
-          {error ? <ErrorBanner error={error} /> : null}
+          <Tabs defaultValue={defaultTab} className="w-full">
+            <TabsList className="grid w-full grid-cols-2">
+              <TabsTrigger value="password">Password</TabsTrigger>
+              <TabsTrigger value="code">Email code</TabsTrigger>
+            </TabsList>
 
-          <form action={sendOtpCodeAction} className="space-y-3">
-            <input type="hidden" name="next" value={next} />
-            <div className="space-y-2">
-              <Label htmlFor="email">Email</Label>
-              <Input
-                id="email"
-                name="email"
-                type="email"
-                required
-                autoComplete="email"
-                placeholder="you@example.com"
-              />
-            </div>
-            <Button type="submit" className="w-full">
-              Send code
-            </Button>
-          </form>
+            <TabsContent value="password" className="space-y-3">
+              {error && method === "password" ? (
+                <ErrorBanner error={error} />
+              ) : null}
+              <form action={signInWithPasswordAction} className="space-y-3">
+                <input type="hidden" name="next" value={safeNext} />
+                <div className="space-y-2">
+                  <Label htmlFor="pwd-email">Email</Label>
+                  <Input
+                    id="pwd-email"
+                    name="email"
+                    type="email"
+                    required
+                    autoComplete="email"
+                    placeholder="you@example.com"
+                  />
+                </div>
+                <div className="space-y-2">
+                  <Label htmlFor="pwd-password">Password</Label>
+                  <Input
+                    id="pwd-password"
+                    name="password"
+                    type="password"
+                    required
+                    autoComplete="current-password"
+                  />
+                </div>
+                <Button type="submit" className="w-full">
+                  Sign in
+                </Button>
+              </form>
+            </TabsContent>
+
+            <TabsContent value="code" className="space-y-3">
+              {error && method === "code" ? (
+                <ErrorBanner error={error} />
+              ) : null}
+              <form action={sendOtpCodeAction} className="space-y-3">
+                <input type="hidden" name="next" value={safeNext} />
+                <div className="space-y-2">
+                  <Label htmlFor="otp-email">Email</Label>
+                  <Input
+                    id="otp-email"
+                    name="email"
+                    type="email"
+                    required
+                    autoComplete="email"
+                    placeholder="you@example.com"
+                  />
+                </div>
+                <Button type="submit" className="w-full">
+                  Send code
+                </Button>
+              </form>
+              <p className="text-xs text-muted-foreground">
+                We&rsquo;ll email you a six-digit code. No password required.
+              </p>
+            </TabsContent>
+          </Tabs>
 
           <p className="text-xs text-muted-foreground">
             First time signing in? An admin still needs to link your account
