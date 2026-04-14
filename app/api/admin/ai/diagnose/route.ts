@@ -1,34 +1,29 @@
-import { generateText, Output } from "ai";
-import { anthropic } from "@ai-sdk/anthropic";
-import { gateway } from "@ai-sdk/gateway";
-import { z } from "zod";
-
-import { amazonLookupSchema } from "@/lib/ai/gear-enrich";
 import {
   verifyAsinExists,
   verifyImageUrl,
 } from "@/lib/amazon-verify";
+import {
+  SerpApiError,
+  buildAmazonSearchQuery,
+  searchAmazonViaSerpApi,
+} from "@/lib/serpapi";
 import { getCurrentAppUser } from "@/lib/supabase/auth";
 
 /**
- * Admin-only diagnostic for the AI Amazon lookup pipeline.
+ * Admin-only diagnostic for the SerpAPI → Amazon verify pipeline.
  *
- * Runs one AI call with web_search against a fixed test query ("Sony
- * FX3") or an admin-supplied one, and returns every observable detail:
- *   - Tool calls the model actually made (i.e. did web_search fire?)
- *   - Raw structured output from the model (before verification)
- *   - Verification results against amazon.com for ASIN and image
+ * Runs a single lookup against a fixed test query ("Sony FX3") or an
+ * admin-supplied one, and returns the full trace:
+ *   - SerpAPI raw result (asin / image / title / sponsored flag)
+ *   - Verification results against amazon.com for both ASIN and image
  *   - Timing
+ *   - Plain-English verdict
  *
- * Purpose: without this, diagnosing "why is the AI hallucinating" means
- * digging through Vercel function logs. This endpoint turns that into a
- * single GET request the admin can make from a browser.
+ * Use this to sanity-check that SERPAPI_API_KEY is set, that SerpAPI
+ * is returning results for a known-good query, and that the verifier
+ * is happy with what SerpAPI gives us.
  *
  * Example: /api/admin/ai/diagnose?q=Sony+FX3
- *
- * If `toolCalls` comes back empty on every query, Gateway is not
- * proxying Anthropic's built-in web_search, and we need to switch to
- * the direct @ai-sdk/anthropic provider (requires ANTHROPIC_API_KEY).
  */
 export async function GET(request: Request) {
   const me = await getCurrentAppUser();
@@ -39,91 +34,71 @@ export async function GET(request: Request) {
   const url = new URL(request.url);
   const rawQuery = url.searchParams.get("q") ?? "Sony FX3";
   const query = rawQuery.slice(0, 200);
+  const searchQuery = buildAmazonSearchQuery({
+    brand: query.split(" ")[0] ?? query,
+    name: query,
+  });
 
-  const MODEL_ID = "anthropic/claude-sonnet-4-5";
   const start = Date.now();
 
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  let result: any;
+  let serpResult;
+  let serpError: string | null = null;
+  let serpErrorStatus: number | null = null;
+
   try {
-    result = await generateText({
-      model: gateway(MODEL_ID),
-      tools: {
-        web_search: anthropic.tools.webSearch_20250305({
-          maxUses: 3,
-          allowedDomains: ["amazon.com"],
-        }),
-      },
-      system:
-        "You find Amazon listings. Use web_search to find the product on amazon.com, extract the ASIN from the /dp/ URL, and return the ASIN + product image URL. Return null for fields you cannot confidently verify.",
-      prompt: `Find the Amazon listing for: ${query}`,
-      experimental_output: Output.object({
-        schema: z.object({
-          asin: z
-            .string()
-            .regex(/^[A-Z0-9]{10}$/)
-            .nullable(),
-          imageUrl: z.string().url().nullable(),
-        }),
-      }),
-    });
+    serpResult = await searchAmazonViaSerpApi(searchQuery);
   } catch (err) {
-    return Response.json(
-      {
-        query,
-        modelId: MODEL_ID,
-        error: err instanceof Error ? err.message : "unknown",
-      },
-      { status: 500 }
-    );
+    serpError = err instanceof Error ? err.message : "unknown";
+    if (err instanceof SerpApiError && err.status) {
+      serpErrorStatus = err.status;
+    }
   }
 
   const durationMs = Date.now() - start;
 
-  // Walk steps to count tool calls (typed as unknown to avoid pulling
-  // in the huge Tool<...> generic from the AI SDK).
-  const steps = (result.steps ?? []) as Array<{
-    toolCalls?: Array<{ toolName: string; input?: unknown }>;
-  }>;
-  const toolCalls = steps.flatMap(
-    (s) =>
-      (s.toolCalls ?? []).map((tc) => ({
-        toolName: tc.toolName,
-        input: tc.input,
-      }))
-  );
+  if (serpError) {
+    return Response.json({
+      query: searchQuery,
+      durationMs,
+      diagnosis: {
+        verdict: `SerpAPI failed: ${serpError}. Check SERPAPI_API_KEY is set in Vercel env vars, and that the key hasn't exhausted its credits.`,
+      },
+      error: serpError,
+      errorStatus: serpErrorStatus,
+    });
+  }
 
-  const raw = result.experimental_output as z.infer<
-    typeof amazonLookupSchema
-  >;
+  if (!serpResult) {
+    return Response.json({
+      query: searchQuery,
+      durationMs,
+      diagnosis: {
+        verdict:
+          "SerpAPI succeeded but returned no results with an ASIN. The query might be too vague or the product isn't on Amazon.",
+      },
+      serpResult: null,
+    });
+  }
 
-  // Verify the AI's output end-to-end, same way the real pipeline does.
+  // Verify what SerpAPI returned.
   const [asinVerdict, imageVerdict] = await Promise.all([
-    raw.asin ? verifyAsinExists(raw.asin) : Promise.resolve({ ok: true }),
-    raw.imageUrl
-      ? verifyImageUrl(raw.imageUrl)
-      : Promise.resolve({ ok: true }),
+    verifyAsinExists(serpResult.asin),
+    serpResult.imageUrl
+      ? verifyImageUrl(serpResult.imageUrl)
+      : Promise.resolve({ ok: true as const }),
   ]);
 
   return Response.json({
-    query,
-    modelId: MODEL_ID,
-    durationMs,
+    query: searchQuery,
+    durationMs: Date.now() - start,
     diagnosis: {
-      webSearchCalls: toolCalls.filter((tc) => tc.toolName === "web_search")
-        .length,
-      totalSteps: steps.length,
-      verdict:
-        toolCalls.filter((tc) => tc.toolName === "web_search").length === 0
-          ? "web_search was NOT invoked — Gateway may not be proxying Anthropic's built-in tool. Consider switching to direct @ai-sdk/anthropic."
-          : raw.asin && !asinVerdict.ok
-            ? "web_search ran but model hallucinated an ASIN that failed verification."
-            : raw.asin && asinVerdict.ok
-              ? "web_search ran, model returned a valid ASIN — pipeline is healthy."
-              : "web_search ran but model returned null (no confident match).",
+      verdict: !asinVerdict.ok
+        ? `SerpAPI returned ASIN ${serpResult.asin} but it failed amazon.com verification (${"reason" in asinVerdict ? asinVerdict.reason : "?"}). Product may be delisted.`
+        : !imageVerdict.ok
+          ? `ASIN verified OK, but the image URL didn't (${"reason" in imageVerdict ? imageVerdict.reason : "?"}). Image will be cleared, ASIN saved.`
+          : `Healthy: SerpAPI found ASIN ${serpResult.asin} (${serpResult.sponsored ? "sponsored" : "organic"}) and it verifies on amazon.com.`,
     },
-    toolCalls,
-    rawOutput: raw,
+    serpResult,
     verification: {
       asin: asinVerdict,
       image: imageVerdict,

@@ -286,6 +286,78 @@ export async function verifyGearAsinAction(gearId: string) {
 }
 
 /**
+ * Nuclear option: clear every gear row's ASIN, and clear every
+ * Amazon-CDN image_url. Admin-uploaded Supabase image URLs are left
+ * alone.
+ *
+ * Used to wipe the slate when the AI populated the DB with
+ * hallucinated data. After running this, the bulk "Backfill missing"
+ * button re-queries everything via SerpAPI (which returns real data).
+ *
+ * Protected behind a confirm token — requires { confirm: "yes-wipe-all" }
+ * in the action payload so this can't fire from a misclick.
+ */
+export async function clearAllAiSourcedDataAction(
+  confirm: string
+): Promise<
+  | { error: string }
+  | { ok: true; clearedAsins: number; clearedImages: number }
+> {
+  const me = await getCurrentAppUser();
+  if (!me || me.appUser.role !== "admin") {
+    return { error: "Forbidden" };
+  }
+  if (confirm !== "yes-wipe-all") {
+    return { error: "Missing or invalid confirmation token" };
+  }
+
+  const client = createSupabaseAdminClient();
+
+  // Count what we're about to clear so we can tell the admin.
+  const [{ count: asinCount }, { data: imgsToClear }] = await Promise.all([
+    client
+      .from("gear_items")
+      .select("id", { count: "exact", head: true })
+      .not("asin", "is", null),
+    client
+      .from("gear_items")
+      .select("id, image_url")
+      .not("image_url", "is", null),
+  ]);
+
+  const amazonImgIds = (imgsToClear ?? [])
+    .filter((r) => r.image_url && /amazon/i.test(r.image_url))
+    .map((r) => r.id);
+
+  // Clear all ASINs.
+  if (asinCount && asinCount > 0) {
+    const { error: e1 } = await client
+      .from("gear_items")
+      .update({ asin: null })
+      .not("asin", "is", null);
+    if (e1) return { error: e1.message };
+  }
+
+  // Clear Amazon-hosted images only.
+  if (amazonImgIds.length > 0) {
+    const { error: e2 } = await client
+      .from("gear_items")
+      .update({ image_url: null })
+      .in("id", amazonImgIds);
+    if (e2) return { error: e2.message };
+  }
+
+  revalidatePath("/admin/gear");
+  revalidatePath("/admin");
+
+  return {
+    ok: true,
+    clearedAsins: asinCount ?? 0,
+    clearedImages: amazonImgIds.length,
+  };
+}
+
+/**
  * Delete a gear item. Cascades to kit_entries via FK, so any contributor
  * kit that referenced this item loses that entry.
  */

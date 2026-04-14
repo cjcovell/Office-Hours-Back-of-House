@@ -442,80 +442,103 @@ update public.users
   where email = 'you@example.com';
 ```
 
-## AI Gateway
+## Gear enrichment pipeline
 
 The "Auto-fill with AI" button in the kit editor + admin gear editor
-calls Vercel AI Gateway to turn a short description ("Sony FX3", "the
-black Shure dynamic mic") into structured catalog data. The model uses
-Anthropic's built-in `web_search` tool restricted to `amazon.com` to
-also find the ASIN and product image for the canonical listing.
+turns a short description ("Sony FX3", "the black Shure dynamic mic")
+into a structured catalog entry by running two stages in sequence:
+
+1. **AI text enrichment** (Vercel AI Gateway → Claude Haiku 4.5) —
+   produces brand, canonical name, model/SKU, best-fit category, and
+   a factual description. No Amazon data, no web search.
+2. **SerpAPI Amazon search** (`lib/serpapi.ts`) — takes the canonical
+   brand/model from stage 1 and runs a real Amazon search. Returns
+   real ASINs and real image URLs from the first organic (non-
+   sponsored) result.
+3. **Amazon HTTP verification** (`lib/amazon-verify.ts`) — HEAD/GET
+   against amazon.com for both ASIN and image URL. Anything that
+   doesn't resolve to a real product page / real image gets nulled
+   before it hits the DB.
+
+> **Earlier attempts:** we first tried a single LLM call with
+> Anthropic's built-in `web_search` tool. Models hallucinated ASINs
+> even with web access (10-char strings that shape-match but point
+> nowhere), and server-side Amazon fetches return different HTML than
+> browsers do, so verification was fragile. SerpAPI removes the
+> guessing entirely — it returns whatever Amazon actually showed it.
+> See commit history for the full debug trail.
 
 ### Setup
 
-1. Vercel dashboard → your project → **AI** tab → enable **AI Gateway**.
-2. The integration auto-injects credentials for Production + Preview
-   environments via OIDC. No env var to set in Vercel.
-3. For **local dev**, either:
-   - Run `vercel env pull .env.local` to fetch the dev key, or
-   - Generate an API key in the AI Gateway dashboard and paste into
-     `.env.local` as `AI_GATEWAY_API_KEY=...`.
+1. **Vercel AI Gateway** — project → **AI** tab → enable. Auto-injects
+   `AI_GATEWAY_API_KEY` for Production + Preview. For local dev, run
+   `vercel env pull .env.local` or paste a personal key.
+2. **SerpAPI** — sign up at [serpapi.com](https://serpapi.com). Free
+   tier covers the initial backfill. Paste the key into Vercel env
+   vars as `SERPAPI_API_KEY` (and into `.env.local` for local dev).
+   [Amazon Search endpoint docs](https://serpapi.com/amazon-search-api).
 
 ### What it fills
 
-| Field       | AI fills? | Source                                                              |
-| ----------- | --------- | ------------------------------------------------------------------- |
-| Brand       | ✅         | LLM reasoning                                                       |
-| Name        | ✅         | LLM reasoning                                                       |
-| Model       | ✅         | LLM reasoning; best effort. Admin reviews.                          |
-| Category    | ✅         | LLM, constrained to the `GEAR_CATEGORIES` enum                      |
-| Description | ✅         | LLM; system prompt bans marketing-speak                             |
-| **ASIN**    | ✅         | Extracted from `/dp/XXXXXXXXXX` URL via `web_search` on amazon.com  |
-| **Image**   | ✅         | Product image URL from Amazon's CDN via `web_search`                |
+| Field       | Source                                          |
+| ----------- | ----------------------------------------------- |
+| Brand       | AI (Haiku)                                      |
+| Name        | AI (Haiku)                                      |
+| Model       | AI (Haiku), best effort                         |
+| Category    | AI (Haiku), constrained to `GEAR_CATEGORIES`    |
+| Description | AI (Haiku); factual, no marketing copy          |
+| **ASIN**    | SerpAPI Amazon Search → HTTP-verified           |
+| **Image**   | SerpAPI thumbnail → HTTP-verified               |
 
-ASIN + image are **best-effort** — the prompt instructs the model to
-return null if it can't confidently identify the listing, and to
-prefer items sold by Amazon.com or the brand's own store over
-third-party resellers. Admin always reviews before flipping status to
-`active`, so wrong ASINs get caught at approval.
+If SerpAPI finds no match (obscure product, typo in query), or if
+verification fails, ASIN + image come back null and the admin enters
+them manually on the pending-review row. Admin always reviews before
+flipping status to `active`.
 
-### Swapping the model
+### Admin tools on `/admin/gear`
 
-`lib/ai/gear-enrich.ts` has a single `MODEL_ID` constant
-(`anthropic/claude-sonnet-4-5`). Swap to any Claude model that
-supports the `web_search_20250305` built-in tool, or rewrite the
-integration to use a different provider's search. Sonnet 4.5 was
-chosen over Haiku 4.5 because reasoning about "which Amazon listing
-is canonical" benefits from the smarter model.
+An amber **Amazon enrichment tools** card at the top of the list
+exposes three actions:
 
-### Backfilling existing catalog entries
+- **Verify existing ASINs** — HEAD-checks every saved ASIN against
+  amazon.com, clears the ones that don't resolve (and their images).
+- **Backfill missing** — runs SerpAPI lookup + verify for every row
+  missing an ASIN or image. Sequential, rate-limited, pausable.
+- **Clear all AI data** (danger zone) — wipes every ASIN and every
+  Amazon-hosted image URL in one go. Admin-uploaded Supabase images
+  are left alone. Used to reset after bad data.
 
-If you have gear that predates the AI lookup (or ones where the
-lookup failed), `/admin/gear` shows an **AI backfill available** card
-at the top with a **Start backfill** button. It processes every item
-missing ASIN or image, one at a time, respecting the rate limit with
-precise retry timing. Pause/resume/cancel supported. For single-item
-retry: the gear edit page has a **"Re-fetch from Amazon"** button
-that runs the same lookup using the item's current brand/name/model
-(no prompt typing).
+Single-item retry on `/admin/gear/[id]`: **Re-fetch from Amazon**
+button runs the SerpAPI lookup for that row using its current
+brand/name/model.
 
-### Cost controls
+### Diagnostics
 
-- Per-user rate limit: 30 requests/min (`lib/rate-limit.ts`). Shared
-  bucket across kit-editor quick-add, admin re-fetch, and bulk
-  backfill.
-- Query capped at 500 chars.
-- `web_search` capped at 3 uses per call via `maxUses: 3`.
-- `allowedDomains: ['amazon.com']` keeps the search focused (and
-  avoids paying for tokens on unrelated sites).
-- Admin doesn't auto-activate — gear stays `pending` until the admin
-  reviews, so wrong ASINs get caught without live affiliate links
-  pointing at the wrong product.
+`GET /api/admin/ai/diagnose?q=Sony+FX3` — admin-only. Runs one
+SerpAPI lookup + verification and returns a JSON trace with a plain-
+English verdict. Use this to sanity-check the key and the pipeline
+without clicking through the UI.
 
-Approximate cost per gear item at current Sonnet 4.5 pricing: $0.015–
-$0.025 including web_search. 100 backfilled items ≈ $2.
+### Cost
 
-If abuse becomes a concern, swap the in-memory rate limiter for
-Vercel KV / Upstash Redis.
+- **Haiku**: ~$0.001 per text enrichment call.
+- **SerpAPI**: ~$0.01–$0.025 per search on paid tiers; free tier
+  covers initial backfills. See
+  [pricing](https://serpapi.com/pricing).
+- **Rate limit**: per-user 30 req/min (`lib/rate-limit.ts`), shared
+  across quick-add / re-fetch / backfill. Query capped at 500 chars.
+
+Approximate total cost for a 150-item backfill: **< $5**.
+
+### Future: migrate off SerpAPI to Amazon Creators API
+
+Once this site qualifies as an Amazon Associate (10 qualified sales
+in trailing 30 days via an active affiliate tag), we can swap
+`lib/serpapi.ts` for Amazon's official
+[Creators API](https://affiliate-program.amazon.com/creatorsapi/docs/en-us/introduction),
+which is free and replaces the deprecating PA-API. Same input/output
+shape; the call site in `lib/ai/gear-enrich.ts` shouldn't need to
+change.
 
 ## Storage
 

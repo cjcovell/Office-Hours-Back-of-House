@@ -1,5 +1,4 @@
 import { generateText, Output } from "ai";
-import { anthropic } from "@ai-sdk/anthropic";
 import { gateway } from "@ai-sdk/gateway";
 import { z } from "zod";
 
@@ -9,37 +8,73 @@ import {
   verifyImageUrl,
 } from "@/lib/amazon-verify";
 import { GEAR_CATEGORIES } from "@/lib/categories";
+import {
+  buildAmazonSearchQuery,
+  SerpApiError,
+  searchAmazonViaSerpApi,
+} from "@/lib/serpapi";
 import { createSupabaseAdminClient } from "@/lib/supabase/admin";
 import { getCurrentAppUser } from "@/lib/supabase/auth";
 
 /**
- * AI-assisted gear enrichment with Amazon lookup.
+ * Gear enrichment pipeline.
  *
- * Pipeline: one call to Claude Sonnet 4.5 via the Vercel AI Gateway with
- * Anthropic's built-in web_search tool locked to amazon.com. The model:
- *   1. Searches amazon.com for the user's query
- *   2. Finds the canonical listing (prefers Amazon.com / brand's own listing
- *      over third-party sellers)
- *   3. Extracts ASIN from the /dp/ URL pattern
- *   4. Pulls a direct image URL from Amazon's CDN
- *   5. Returns structured data matching the schema below
+ * Split responsibilities:
+ *  - **AI (Claude Haiku via Gateway)** — text enrichment only. Takes a
+ *    short user query ("Sony FX3") and produces structured text fields:
+ *    brand, name, model, category, description. No ASINs, no image
+ *    URLs — the AI does not see Amazon listings and cannot hallucinate
+ *    product IDs.
+ *  - **SerpAPI (Amazon Search)** — real product lookup. Given the
+ *    canonical brand/model from the AI (or from an existing gear row),
+ *    runs an actual Amazon search and returns real ASIN + image URL
+ *    from search results.
+ *  - **Amazon HTTP verification** — final sanity check. Both the ASIN
+ *    and the image URL are HEAD/GET-tested against amazon.com before
+ *    writing to the DB. SerpAPI is reliable, but products get delisted
+ *    and stale results linger.
  *
- * Guardrails:
- *  - ASIN is regex-pinned to 10 uppercase alphanumerics, and the prompt
- *    instructs the model to return null when uncertain. Wrong ASINs route
- *    affiliate clicks to the wrong product — a missing one is strictly
- *    better than a wrong one.
- *  - Admin still reviews before flipping status to 'active'. We never
- *    auto-publish.
- *  - Search is restricted to amazon.com via allowedDomains so the model
- *    doesn't wander into eBay / BHPhotoVideo / sketchy reseller sites.
+ * We previously tried AI + built-in web_search. Models hallucinated
+ * ASINs even with tool access, and server-side Amazon fetches return
+ * different HTML than browsers see, making verification fragile. The
+ * SerpAPI split removes the guessing entirely.
  */
+
+// ---------- Public schemas --------------------------------------------------
 
 const CategoryEnum = z.enum(
   GEAR_CATEGORIES as unknown as readonly [string, ...string[]]
 );
 
 export const gearEnrichSchema = z.object({
+  brand: z.string().min(1).max(80),
+  name: z.string().min(1).max(120),
+  model: z.string().min(1).max(80),
+  category: CategoryEnum,
+  description: z.string().min(1).max(400),
+  asin: z.string().regex(/^[A-Z0-9]{10}$/).nullable(),
+  imageUrl: z.string().url().nullable(),
+});
+
+export type GearEnrichResult = z.infer<typeof gearEnrichSchema>;
+
+export const amazonLookupSchema = z.object({
+  asin: z.string().regex(/^[A-Z0-9]{10}$/).nullable(),
+  imageUrl: z.string().url().nullable(),
+});
+
+export type AmazonLookupResult = z.infer<typeof amazonLookupSchema>;
+
+// ---------- Models ----------------------------------------------------------
+
+// Haiku is plenty for text extraction — no reasoning-heavy work now
+// that we've moved ASIN lookup out of the LLM's hands. ~5× cheaper
+// than Sonnet per call.
+const TEXT_MODEL_ID = "anthropic/claude-haiku-4-5";
+
+// ---------- Text-enrichment schema (AI only, no Amazon data) ----------------
+
+const gearTextSchema = z.object({
   brand: z
     .string()
     .min(1)
@@ -71,85 +106,26 @@ export const gearEnrichSchema = z.object({
     .describe(
       "One or two factual sentences about what it is and what it's used for in broadcast/production. No marketing adjectives."
     ),
-  asin: z
-    .string()
-    .regex(/^[A-Z0-9]{10}$/)
-    .nullable()
-    .describe(
-      "The 10-character ASIN extracted from the Amazon listing's /dp/ URL. " +
-        "Return null if you can't confidently identify the canonical listing, " +
-        "or if the top result is sold by a third-party seller you don't " +
-        "recognize (prefer listings sold by Amazon.com or the brand's own " +
-        "official listing). NEVER invent an ASIN — null is strictly better " +
-        "than wrong."
-    ),
-  imageUrl: z
-    .string()
-    .url()
-    .nullable()
-    .describe(
-      "Direct URL to the product image from Amazon's CDN (hosts like " +
-        "m.media-amazon.com or images-na.ssl-images-amazon.com). Return null " +
-        "if you don't have a high-confidence image URL."
-    ),
 });
 
-export type GearEnrichResult = z.infer<typeof gearEnrichSchema>;
+type GearTextResult = z.infer<typeof gearTextSchema>;
 
-const MODEL_ID = "anthropic/claude-sonnet-4-5";
+const TEXT_SYSTEM_PROMPT = `You are a catalog assistant for Office Hours Global, a daily broadcast/production show. Contributors describe pieces of gear; you produce structured catalog text.
 
-const SYSTEM_PROMPT = `You are a catalog assistant for Office Hours Global, a daily broadcast/production show. Contributors describe pieces of gear they use; you return structured catalog metadata plus an Amazon ASIN and image URL.
-
-Procedure:
-1. Use web_search to find the product on amazon.com. Queries should be specific: "<brand> <model>" or "<product name> amazon".
-2. Look at the top result. It should be the canonical listing for the product.
-3. Extract the ASIN from the URL. Amazon URLs contain ASINs in the pattern /dp/XXXXXXXXXX or /gp/product/XXXXXXXXXX — 10 uppercase alphanumeric chars. If you see multiple ASINs across multiple listings, pick the one whose listing matches the brand and model best.
-4. Check the seller if visible in search-result snippets. Prefer listings sold by "Amazon.com" or the brand's own store. If the top result is clearly a third-party reseller and you can find an Amazon-sold alternative, prefer that one. If the only results are third-party, return null for asin.
-5. Grab the product image URL from the listing if available. Prefer m.media-amazon.com or images-na.ssl-images-amazon.com URLs.
-
-Rules for the structured output:
-- Return null for asin if you are not highly confident you have the right product. The contributor would rather have no link than a link to the wrong item.
-- Return null for imageUrl if you don't have a direct image URL from Amazon's CDN.
-- Description should be plain and factual. No "perfect for" or "unleash your creativity" marketing language.
-- category must be one of the enum values exactly — don't invent new categories.`;
-
-// ---------- Focused Amazon lookup (backfill path) ---------------------------
-//
-// Used when we already have canonical brand/name/model and just want the
-// ASIN + image URL. Narrower prompt, narrower schema, same web_search tool.
-
-export const amazonLookupSchema = z.object({
-  asin: z
-    .string()
-    .regex(/^[A-Z0-9]{10}$/)
-    .nullable()
-    .describe(
-      "10-char ASIN from /dp/ URL. NULL if you cannot confidently identify the listing or all top results are third-party resellers."
-    ),
-  imageUrl: z
-    .string()
-    .url()
-    .nullable()
-    .describe(
-      "Direct product-image URL from Amazon's CDN (m.media-amazon.com / images-na.ssl-images-amazon.com). NULL if uncertain."
-    ),
-});
-
-export type AmazonLookupResult = z.infer<typeof amazonLookupSchema>;
-
-const LOOKUP_SYSTEM_PROMPT = `You find Amazon listings for pieces of broadcast/production gear. The caller already knows the brand, product name, and model — your job is to identify the listing on amazon.com and return its ASIN and product image URL.
-
-Procedure:
-1. Search amazon.com for "<brand> <model>" (or "<brand> <name>" if the model string is too generic).
-2. Look at the top results. Pick the one whose title matches both the brand AND the model.
-3. Extract the ASIN from the URL (format: /dp/XXXXXXXXXX — 10 uppercase alphanumeric chars).
-4. If visible in snippets, prefer listings sold by Amazon.com or the brand's own storefront over third-party resellers. If the only matches are obviously third-party, return null for asin.
-5. Grab the product image URL if available (prefer m.media-amazon.com URLs).
+Return brand, canonical product name, specific model/SKU, a best-fit category from the enum, and a short factual description.
 
 Rules:
-- Return null if not highly confident. Wrong ASINs are worse than missing ones.
-- Don't invent ASINs.`;
+- Descriptions are plain and factual. No "perfect for" or "unleash your creativity" marketing language.
+- category must be exactly one of the enum values — don't invent new categories.
+- Do NOT invent specifics you're unsure about. Admin reviews everything.`;
 
+// ---------- Focused Amazon lookup (backfill / re-fetch) ---------------------
+
+/**
+ * Look up a product on Amazon via SerpAPI given its canonical
+ * brand/name/model. Returns a verified ASIN + image URL, or nulls if
+ * nothing matched or verification failed.
+ */
 export async function lookupAmazonDetails(params: {
   brand: string;
   name: string;
@@ -159,25 +135,16 @@ export async function lookupAmazonDetails(params: {
   if (!brand.trim() || !name.trim()) {
     throw new Error("brand and name are required");
   }
-  const query = `${brand} ${name} ${model}`.trim();
+
+  const query = buildAmazonSearchQuery({ brand, name, model });
   const start = Date.now();
 
-  let result;
+  let serp;
   try {
-    result = await generateText({
-      model: gateway(MODEL_ID),
-      tools: {
-        web_search: anthropic.tools.webSearch_20250305({
-          maxUses: 3,
-          allowedDomains: ["amazon.com"],
-        }),
-      },
-      system: LOOKUP_SYSTEM_PROMPT,
-      prompt: `Brand: ${brand}\nProduct: ${name}\nModel: ${model}`,
-      experimental_output: Output.object({ schema: amazonLookupSchema }),
-    });
+    serp = await searchAmazonViaSerpApi(query);
   } catch (err) {
     const msg = err instanceof Error ? err.message : "unknown";
+    console.warn(`[gear-enrich] SerpAPI error for "${query}": ${msg}`);
     void logAiCall({
       fn: "lookupAmazonDetails",
       query,
@@ -187,11 +154,22 @@ export async function lookupAmazonDetails(params: {
     throw err;
   }
 
-  const raw = result.experimental_output as AmazonLookupResult;
-  logToolDiagnostics("lookupAmazonDetails", result, { brand, name, model });
+  if (!serp) {
+    // No results for this query. Not an error — just nothing to save.
+    void logAiCall({
+      fn: "lookupAmazonDetails",
+      query,
+      durationMs: Date.now() - start,
+      aiReturnedAsin: null,
+      aiReturnedImage: null,
+      finalAsin: null,
+      finalImage: null,
+    });
+    return { asin: null, imageUrl: null };
+  }
 
   const [cleaned, verdicts] = await verifyAndCleanAsinWithDiagnostics(
-    raw,
+    { asin: serp.asin, imageUrl: serp.imageUrl },
     query
   );
 
@@ -199,10 +177,8 @@ export async function lookupAmazonDetails(params: {
     fn: "lookupAmazonDetails",
     query,
     durationMs: Date.now() - start,
-    stepCount: result.steps?.length ?? 0,
-    webSearchCalls: countWebSearch(result),
-    aiReturnedAsin: raw.asin,
-    aiReturnedImage: raw.imageUrl,
+    aiReturnedAsin: serp.asin,
+    aiReturnedImage: serp.imageUrl,
     asinVerdict: verdicts.asin,
     imageVerdict: verdicts.image,
     finalAsin: cleaned.asin,
@@ -212,8 +188,16 @@ export async function lookupAmazonDetails(params: {
   return cleaned;
 }
 
-// ---------- Full enrichment (user-query path) -------------------------------
+// ---------- Full enrichment (kit-editor quick-add) --------------------------
 
+/**
+ * Given a vague user query ("Sony FX3", "the black Shure mic"), produce
+ * full structured catalog data: AI for text fields, SerpAPI for ASIN +
+ * image, HTTP verify before returning.
+ *
+ * If SerpAPI fails (no key, rate limit, no match), returns text fields
+ * with asin/imageUrl as null — admin can enter them manually.
+ */
 export async function enrichGearFromQuery(
   query: string
 ): Promise<GearEnrichResult> {
@@ -223,20 +207,16 @@ export async function enrichGearFromQuery(
 
   const start = Date.now();
 
-  let result;
+  // Step 1: AI text enrichment.
+  let textResult: GearTextResult;
   try {
-    result = await generateText({
-      model: gateway(MODEL_ID),
-      tools: {
-        web_search: anthropic.tools.webSearch_20250305({
-          maxUses: 3,
-          allowedDomains: ["amazon.com"],
-        }),
-      },
-      system: SYSTEM_PROMPT,
+    const result = await generateText({
+      model: gateway(TEXT_MODEL_ID),
+      system: TEXT_SYSTEM_PROMPT,
       prompt: `User query: ${trimmed}`,
-      experimental_output: Output.object({ schema: gearEnrichSchema }),
+      experimental_output: Output.object({ schema: gearTextSchema }),
     });
+    textResult = result.experimental_output as GearTextResult;
   } catch (err) {
     const msg = err instanceof Error ? err.message : "unknown";
     void logAiCall({
@@ -248,44 +228,74 @@ export async function enrichGearFromQuery(
     throw err;
   }
 
-  const raw = result.experimental_output as GearEnrichResult;
-  logToolDiagnostics("enrichGearFromQuery", result, { query: trimmed });
+  // Step 2: SerpAPI lookup using the canonicalized brand/model.
+  // SerpAPI failures here are non-fatal — we still return the text
+  // fields so the admin has something to work with.
+  const searchQuery = buildAmazonSearchQuery({
+    brand: textResult.brand,
+    name: textResult.name,
+    model: textResult.model,
+  });
 
-  // Verify the AI's ASIN + image actually resolve on Amazon. If not,
-  // null them out (coupled clear for ASIN; standalone clear for image).
+  let serpAsin: string | null = null;
+  let serpImage: string | null = null;
+  let serpError: string | undefined;
+  try {
+    const serp = await searchAmazonViaSerpApi(searchQuery);
+    if (serp) {
+      serpAsin = serp.asin;
+      serpImage = serp.imageUrl;
+    }
+  } catch (err) {
+    serpError = err instanceof Error ? err.message : "unknown";
+    if (!(err instanceof SerpApiError)) {
+      // Re-throw unexpected errors so we notice bugs; SerpApiErrors are
+      // logged and swallowed so the text fields still come back.
+      console.warn(
+        `[gear-enrich] Non-SerpApi error during lookup: ${serpError}`
+      );
+    } else {
+      console.warn(`[gear-enrich] SerpAPI error for "${searchQuery}": ${serpError}`);
+    }
+  }
+
+  // Step 3: Verify whatever SerpAPI gave us.
   const [cleaned, verdicts] = await verifyAndCleanAsinWithDiagnostics(
-    { asin: raw.asin, imageUrl: raw.imageUrl },
-    trimmed
+    { asin: serpAsin, imageUrl: serpImage },
+    searchQuery
   );
 
   void logAiCall({
     fn: "enrichGearFromQuery",
     query: trimmed,
     durationMs: Date.now() - start,
-    stepCount: result.steps?.length ?? 0,
-    webSearchCalls: countWebSearch(result),
-    aiReturnedAsin: raw.asin,
-    aiReturnedImage: raw.imageUrl,
+    aiReturnedAsin: serpAsin,
+    aiReturnedImage: serpImage,
     asinVerdict: verdicts.asin,
     imageVerdict: verdicts.image,
     finalAsin: cleaned.asin,
     finalImage: cleaned.imageUrl,
+    error: serpError,
   });
 
-  return { ...raw, asin: cleaned.asin, imageUrl: cleaned.imageUrl };
+  return {
+    ...textResult,
+    asin: cleaned.asin,
+    imageUrl: cleaned.imageUrl,
+  };
 }
 
-// ---------- Verification + diagnostics --------------------------------------
+// ---------- Verification ----------------------------------------------------
 
 /**
- * Run the AI's proposed ASIN and image URL through real HTTP checks,
- * returning both the cleaned result AND the individual verdicts so the
- * caller can persist them for telemetry.
+ * Run the proposed ASIN + image URL through real HTTP checks against
+ * amazon.com. Returns the cleaned values AND the individual verdicts
+ * so the caller can persist them for telemetry.
  *
- * Coupling rule: if the ASIN fails, we also null out the image — they
- * came from the same AI response, so a hallucinated ASIN implies a
- * hallucinated image. If only the image fails (ASIN valid), we keep
- * the ASIN.
+ * Coupling rule: if the ASIN fails verification, also null out the
+ * image — they were returned together by the same SerpAPI result, so
+ * a bad ASIN means a bad/wrong image. If only the image fails (ASIN
+ * verified fine), keep the ASIN.
  */
 async function verifyAndCleanAsinWithDiagnostics<
   T extends { asin: string | null; imageUrl: string | null },
@@ -315,7 +325,7 @@ async function verifyAndCleanAsinWithDiagnostics<
 
   if (result.asin && !asinVerdict.ok) {
     console.warn(
-      `[gear-enrich] Discarding unverifiable ASIN ${result.asin} for "${context}": ${"reason" in asinVerdict ? asinVerdict.reason : ""} (also clearing image — same AI response)`
+      `[gear-enrich] Discarding unverifiable ASIN ${result.asin} for "${context}": ${"reason" in asinVerdict ? asinVerdict.reason : ""} (also clearing image)`
     );
     asin = null;
     imageUrl = null;
@@ -332,28 +342,20 @@ async function verifyAndCleanAsinWithDiagnostics<
   ];
 }
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-function countWebSearch(result: any): number {
-  const steps = (result.steps ?? []) as Array<{
-    toolCalls?: Array<{ toolName: string }>;
-  }>;
-  return steps.reduce(
-    (n, step) =>
-      n + (step.toolCalls ?? []).filter((tc) => tc.toolName === "web_search").length,
-    0
-  );
-}
+// ---------- Telemetry ------------------------------------------------------
 
 /**
  * Fire-and-forget telemetry write to public.ai_call_logs. Failures are
  * swallowed — logging must never break the caller's lookup.
+ *
+ * The table schema predates the SerpAPI swap; the web_search-specific
+ * columns (step_count, web_search_calls) are left null now. Rename /
+ * clean up later if the column list drifts further.
  */
 async function logAiCall(params: {
   fn: string;
   query: string;
   durationMs: number;
-  stepCount?: number;
-  webSearchCalls?: number;
   aiReturnedAsin?: string | null;
   aiReturnedImage?: string | null;
   asinVerdict?: AsinVerification | { ok: true };
@@ -370,10 +372,10 @@ async function logAiCall(params: {
       user_id: me?.authId ?? null,
       fn: params.fn,
       query: params.query,
-      model_id: MODEL_ID,
+      model_id: params.fn === "enrichGearFromQuery" ? TEXT_MODEL_ID : "serpapi",
       duration_ms: params.durationMs ?? null,
-      step_count: params.stepCount ?? null,
-      web_search_calls: params.webSearchCalls ?? null,
+      step_count: null,
+      web_search_calls: null,
       ai_returned_asin: params.aiReturnedAsin ?? null,
       ai_returned_image: params.aiReturnedImage ?? null,
       asin_verified:
@@ -397,37 +399,8 @@ async function logAiCall(params: {
       error: params.error ?? null,
     });
   } catch (err) {
-    // Never let logging failure break the AI pipeline.
     console.warn(
       `[gear-enrich] Failed to log AI call: ${err instanceof Error ? err.message : err}`
     );
   }
-}
-
-/**
- * Log whether the model actually invoked web_search. Shows up in Vercel
- * function logs. If we see "[gear-enrich] 0 web_search calls" on most
- * requests, the Gateway isn't proxying the Anthropic built-in tool and
- * we need to switch to the direct @ai-sdk/anthropic provider for this
- * path.
- */
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-function logToolDiagnostics(fn: string, result: any, ctx: Record<string, string>) {
-  // Walk through steps and count tool calls. The parameterized type of
-  // generateText's return depends on the tool set; we don't care about
-  // the type here, just the call-count signal, so `any` is fine.
-  const steps = (result.steps ?? []) as Array<{
-    toolCalls?: Array<{ toolName: string }>;
-  }>;
-  const searchCalls = steps.flatMap((step) =>
-    (step.toolCalls ?? []).filter((tc) => tc.toolName === "web_search")
-  );
-
-  const ctxStr = Object.entries(ctx)
-    .map(([k, v]) => `${k}=${JSON.stringify(v)}`)
-    .join(" ");
-
-  console.info(
-    `[gear-enrich] ${fn}: ${searchCalls.length} web_search calls · ${steps.length} steps · ${ctxStr}`
-  );
 }

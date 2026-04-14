@@ -16,9 +16,20 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import {
+  clearAllAiSourcedDataAction,
   lookupGearAmazonAction,
   verifyGearAsinAction,
 } from "@/app/admin/gear/actions";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+  DialogTrigger,
+} from "@/components/ui/dialog";
+import { Trash2 } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 type MissingItem = {
@@ -255,6 +266,23 @@ export function AdminBulkBackfill() {
     setPhase("idle");
   }
 
+  const [wipeOpen, setWipeOpen] = useState(false);
+  const [wiping, setWiping] = useState(false);
+  async function handleWipeAll() {
+    setWiping(true);
+    const res = await clearAllAiSourcedDataAction("yes-wipe-all");
+    setWiping(false);
+    setWipeOpen(false);
+    if ("error" in res) {
+      toast.error(`Wipe failed: ${res.error}`);
+      return;
+    }
+    toast.success(
+      `Wiped ${res.clearedAsins} ASIN${res.clearedAsins === 1 ? "" : "s"} and ${res.clearedImages} Amazon image${res.clearedImages === 1 ? "" : "s"}. Admin-uploaded images untouched.`
+    );
+    await loadLists();
+  }
+
   if (!loaded && !loadError) return null;
   if (loadError) {
     return (
@@ -263,7 +291,10 @@ export function AdminBulkBackfill() {
       </div>
     );
   }
-  if (missing.length === 0 && withAsin.length === 0) return null;
+  // Show the card whenever there's ANYTHING to do: items to backfill,
+  // items to verify, or (if either list has rows) the wipe action.
+  const anyWork = missing.length > 0 || withAsin.length > 0;
+  if (!anyWork) return null;
 
   const isRunning = phase === "verify" || phase === "backfill";
   const completed = activeIds.filter((id) => {
@@ -279,11 +310,67 @@ export function AdminBulkBackfill() {
   return (
     <Card className="border-amber-500/30 bg-amber-50/20 dark:bg-amber-500/5">
       <CardContent className="space-y-4 p-5">
-        <div className="flex items-center gap-2">
-          <Sparkles className="size-4 text-amber-600" />
-          <h3 className="text-sm font-semibold tracking-tight">
-            AI enrichment tools
-          </h3>
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div className="flex items-center gap-2">
+            <Sparkles className="size-4 text-amber-600" />
+            <h3 className="text-sm font-semibold tracking-tight">
+              Amazon enrichment tools
+            </h3>
+          </div>
+
+          {/* Danger zone: wipe all AI-sourced ASINs + Amazon images. */}
+          <Dialog open={wipeOpen} onOpenChange={setWipeOpen}>
+            <DialogTrigger asChild>
+              <Button
+                size="sm"
+                variant="outline"
+                className="text-destructive hover:bg-destructive/10"
+                disabled={isRunning || wiping}
+              >
+                <Trash2 className="size-3.5" />
+                Clear all AI data
+              </Button>
+            </DialogTrigger>
+            <DialogContent>
+              <DialogHeader>
+                <DialogTitle>Clear all AI-sourced ASINs + images?</DialogTitle>
+                <DialogDescription className="space-y-2 pt-2">
+                  <span className="block">
+                    This wipes <strong>every</strong> ASIN from the catalog
+                    and clears image URLs that are hosted on Amazon&rsquo;s
+                    CDN.
+                  </span>
+                  <span className="block">
+                    <strong>Admin-uploaded images (Supabase storage) are
+                    left alone.</strong>
+                  </span>
+                  <span className="block text-xs">
+                    Use this to reset after the AI populated bad data.
+                    After wiping, click <em>Backfill missing</em> to re-run
+                    the SerpAPI lookup — that returns real Amazon data, not
+                    hallucinations.
+                  </span>
+                </DialogDescription>
+              </DialogHeader>
+              <DialogFooter>
+                <Button
+                  variant="ghost"
+                  onClick={() => setWipeOpen(false)}
+                  disabled={wiping}
+                >
+                  Cancel
+                </Button>
+                <Button
+                  variant="outline"
+                  className="text-destructive"
+                  onClick={handleWipeAll}
+                  disabled={wiping}
+                >
+                  {wiping ? "Wiping…" : "Yes, wipe all"}
+                </Button>
+              </DialogFooter>
+            </DialogContent>
+          </Dialog>
         </div>
 
         <div className="grid gap-3 sm:grid-cols-2">
@@ -295,8 +382,8 @@ export function AdminBulkBackfill() {
             </div>
             <p className="text-xs text-muted-foreground">
               Check each saved ASIN against amazon.com. Rows whose ASINs
-              don&rsquo;t resolve get their ASIN + image cleared, so you can
-              re-run the backfill to try a fresh lookup.
+              don&rsquo;t resolve get their ASIN + image cleared so
+              Backfill can retry them.
             </p>
             <div className="flex items-center justify-between">
               <span className="text-xs text-muted-foreground">
@@ -321,8 +408,8 @@ export function AdminBulkBackfill() {
               <h4 className="text-sm font-medium">Backfill missing</h4>
             </div>
             <p className="text-xs text-muted-foreground">
-              Run the AI Amazon lookup for every item missing an ASIN or
-              image. Verified before saving.
+              Run the SerpAPI Amazon lookup for every item missing an
+              ASIN or image. Real search results, verified before saving.
             </p>
             <div className="flex items-center justify-between">
               <span className="text-xs text-muted-foreground">
