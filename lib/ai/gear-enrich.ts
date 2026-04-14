@@ -3,8 +3,14 @@ import { anthropic } from "@ai-sdk/anthropic";
 import { gateway } from "@ai-sdk/gateway";
 import { z } from "zod";
 
-import { verifyAsinExists, verifyImageUrl } from "@/lib/amazon-verify";
+import {
+  type AsinVerification,
+  verifyAsinExists,
+  verifyImageUrl,
+} from "@/lib/amazon-verify";
 import { GEAR_CATEGORIES } from "@/lib/categories";
+import { createSupabaseAdminClient } from "@/lib/supabase/admin";
+import { getCurrentAppUser } from "@/lib/supabase/auth";
 
 /**
  * AI-assisted gear enrichment with Amazon lookup.
@@ -153,23 +159,57 @@ export async function lookupAmazonDetails(params: {
   if (!brand.trim() || !name.trim()) {
     throw new Error("brand and name are required");
   }
+  const query = `${brand} ${name} ${model}`.trim();
+  const start = Date.now();
 
-  const result = await generateText({
-    model: gateway(MODEL_ID),
-    tools: {
-      web_search: anthropic.tools.webSearch_20250305({
-        maxUses: 3,
-        allowedDomains: ["amazon.com"],
-      }),
-    },
-    system: LOOKUP_SYSTEM_PROMPT,
-    prompt: `Brand: ${brand}\nProduct: ${name}\nModel: ${model}`,
-    experimental_output: Output.object({ schema: amazonLookupSchema }),
-  });
+  let result;
+  try {
+    result = await generateText({
+      model: gateway(MODEL_ID),
+      tools: {
+        web_search: anthropic.tools.webSearch_20250305({
+          maxUses: 3,
+          allowedDomains: ["amazon.com"],
+        }),
+      },
+      system: LOOKUP_SYSTEM_PROMPT,
+      prompt: `Brand: ${brand}\nProduct: ${name}\nModel: ${model}`,
+      experimental_output: Output.object({ schema: amazonLookupSchema }),
+    });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : "unknown";
+    void logAiCall({
+      fn: "lookupAmazonDetails",
+      query,
+      durationMs: Date.now() - start,
+      error: msg,
+    });
+    throw err;
+  }
 
   const raw = result.experimental_output as AmazonLookupResult;
   logToolDiagnostics("lookupAmazonDetails", result, { brand, name, model });
-  return await verifyAndCleanAsin(raw, `${brand} ${name} ${model}`);
+
+  const [cleaned, verdicts] = await verifyAndCleanAsinWithDiagnostics(
+    raw,
+    query
+  );
+
+  void logAiCall({
+    fn: "lookupAmazonDetails",
+    query,
+    durationMs: Date.now() - start,
+    stepCount: result.steps?.length ?? 0,
+    webSearchCalls: countWebSearch(result),
+    aiReturnedAsin: raw.asin,
+    aiReturnedImage: raw.imageUrl,
+    asinVerdict: verdicts.asin,
+    imageVerdict: verdicts.image,
+    finalAsin: cleaned.asin,
+    finalImage: cleaned.imageUrl,
+  });
+
+  return cleaned;
 }
 
 // ---------- Full enrichment (user-query path) -------------------------------
@@ -181,53 +221,86 @@ export async function enrichGearFromQuery(
   if (!trimmed) throw new Error("Query is required");
   if (trimmed.length > 500) throw new Error("Query too long (max 500 chars)");
 
-  const result = await generateText({
-    model: gateway(MODEL_ID),
-    tools: {
-      web_search: anthropic.tools.webSearch_20250305({
-        maxUses: 3,
-        allowedDomains: ["amazon.com"],
-      }),
-    },
-    system: SYSTEM_PROMPT,
-    prompt: `User query: ${trimmed}`,
-    experimental_output: Output.object({ schema: gearEnrichSchema }),
-  });
+  const start = Date.now();
+
+  let result;
+  try {
+    result = await generateText({
+      model: gateway(MODEL_ID),
+      tools: {
+        web_search: anthropic.tools.webSearch_20250305({
+          maxUses: 3,
+          allowedDomains: ["amazon.com"],
+        }),
+      },
+      system: SYSTEM_PROMPT,
+      prompt: `User query: ${trimmed}`,
+      experimental_output: Output.object({ schema: gearEnrichSchema }),
+    });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : "unknown";
+    void logAiCall({
+      fn: "enrichGearFromQuery",
+      query: trimmed,
+      durationMs: Date.now() - start,
+      error: msg,
+    });
+    throw err;
+  }
 
   const raw = result.experimental_output as GearEnrichResult;
   logToolDiagnostics("enrichGearFromQuery", result, { query: trimmed });
 
-  // Verify the AI's ASIN actually resolves on Amazon. If not, null it
-  // out (along with imageUrl — if the product page doesn't exist, the
-  // image URL is probably from a different product).
-  const cleaned = await verifyAndCleanAsin(
+  // Verify the AI's ASIN + image actually resolve on Amazon. If not,
+  // null them out (coupled clear for ASIN; standalone clear for image).
+  const [cleaned, verdicts] = await verifyAndCleanAsinWithDiagnostics(
     { asin: raw.asin, imageUrl: raw.imageUrl },
     trimmed
   );
+
+  void logAiCall({
+    fn: "enrichGearFromQuery",
+    query: trimmed,
+    durationMs: Date.now() - start,
+    stepCount: result.steps?.length ?? 0,
+    webSearchCalls: countWebSearch(result),
+    aiReturnedAsin: raw.asin,
+    aiReturnedImage: raw.imageUrl,
+    asinVerdict: verdicts.asin,
+    imageVerdict: verdicts.image,
+    finalAsin: cleaned.asin,
+    finalImage: cleaned.imageUrl,
+  });
+
   return { ...raw, asin: cleaned.asin, imageUrl: cleaned.imageUrl };
 }
 
 // ---------- Verification + diagnostics --------------------------------------
 
 /**
- * Run the AI's proposed ASIN and image URL through real HTTP checks.
- * Discards ASINs that 404 on amazon.com and image URLs that don't
- * resolve to a real image.
+ * Run the AI's proposed ASIN and image URL through real HTTP checks,
+ * returning both the cleaned result AND the individual verdicts so the
+ * caller can persist them for telemetry.
  *
  * Coupling rule: if the ASIN fails, we also null out the image — they
  * came from the same AI response, so a hallucinated ASIN implies a
  * hallucinated image. If only the image fails (ASIN valid), we keep
  * the ASIN.
- *
- * Runs verifies in parallel. Adds ~1-2s per call; worth it to avoid
- * saving garbage that gives users broken affiliate links and blue-?
- * image placeholders.
  */
-async function verifyAndCleanAsin<
+async function verifyAndCleanAsinWithDiagnostics<
   T extends { asin: string | null; imageUrl: string | null },
->(result: T, context: string): Promise<T> {
-  if (!result.asin && !result.imageUrl) return result;
-
+>(
+  result: T,
+  context: string
+): Promise<
+  [
+    T,
+    {
+      asin: AsinVerification | { ok: true };
+      image: AsinVerification | { ok: true };
+    },
+  ]
+> {
   const [asinVerdict, imageVerdict] = await Promise.all([
     result.asin
       ? verifyAsinExists(result.asin)
@@ -253,7 +326,82 @@ async function verifyAndCleanAsin<
     imageUrl = null;
   }
 
-  return { ...result, asin, imageUrl };
+  return [
+    { ...result, asin, imageUrl },
+    { asin: asinVerdict, image: imageVerdict },
+  ];
+}
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function countWebSearch(result: any): number {
+  const steps = (result.steps ?? []) as Array<{
+    toolCalls?: Array<{ toolName: string }>;
+  }>;
+  return steps.reduce(
+    (n, step) =>
+      n + (step.toolCalls ?? []).filter((tc) => tc.toolName === "web_search").length,
+    0
+  );
+}
+
+/**
+ * Fire-and-forget telemetry write to public.ai_call_logs. Failures are
+ * swallowed — logging must never break the caller's lookup.
+ */
+async function logAiCall(params: {
+  fn: string;
+  query: string;
+  durationMs: number;
+  stepCount?: number;
+  webSearchCalls?: number;
+  aiReturnedAsin?: string | null;
+  aiReturnedImage?: string | null;
+  asinVerdict?: AsinVerification | { ok: true };
+  imageVerdict?: AsinVerification | { ok: true };
+  finalAsin?: string | null;
+  finalImage?: string | null;
+  error?: string;
+}): Promise<void> {
+  try {
+    const me = await getCurrentAppUser().catch(() => null);
+    const client = createSupabaseAdminClient();
+
+    await client.from("ai_call_logs").insert({
+      user_id: me?.authId ?? null,
+      fn: params.fn,
+      query: params.query,
+      model_id: MODEL_ID,
+      duration_ms: params.durationMs ?? null,
+      step_count: params.stepCount ?? null,
+      web_search_calls: params.webSearchCalls ?? null,
+      ai_returned_asin: params.aiReturnedAsin ?? null,
+      ai_returned_image: params.aiReturnedImage ?? null,
+      asin_verified:
+        params.asinVerdict === undefined || !params.aiReturnedAsin
+          ? null
+          : params.asinVerdict.ok,
+      asin_fail_reason:
+        params.asinVerdict && !params.asinVerdict.ok && "reason" in params.asinVerdict
+          ? params.asinVerdict.reason
+          : null,
+      image_verified:
+        params.imageVerdict === undefined || !params.aiReturnedImage
+          ? null
+          : params.imageVerdict.ok,
+      image_fail_reason:
+        params.imageVerdict && !params.imageVerdict.ok && "reason" in params.imageVerdict
+          ? params.imageVerdict.reason
+          : null,
+      final_asin: params.finalAsin ?? null,
+      final_image: params.finalImage ?? null,
+      error: params.error ?? null,
+    });
+  } catch (err) {
+    // Never let logging failure break the AI pipeline.
+    console.warn(
+      `[gear-enrich] Failed to log AI call: ${err instanceof Error ? err.message : err}`
+    );
+  }
 }
 
 /**

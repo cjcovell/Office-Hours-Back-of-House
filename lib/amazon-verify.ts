@@ -59,38 +59,64 @@ export async function verifyAsinExists(
     const res = await fetch(`https://www.amazon.com/dp/${asin}`, {
       redirect: "follow",
       headers: REQUEST_HEADERS,
-      signal: AbortSignal.timeout(8000),
+      signal: AbortSignal.timeout(10_000),
     });
 
     if (!res.ok) {
       return { ok: false, reason: `HTTP ${res.status}` };
     }
 
-    // Final URL after redirects — if Amazon redirected away from /dp/,
-    // the ASIN likely didn't exist and they bounced us to a search or
-    // home page. (They don't 404 consistently; sometimes they 302.)
-    const finalUrl = res.url;
-    if (
-      !finalUrl.includes("/dp/") &&
-      !finalUrl.includes("/gp/product/")
-    ) {
-      return { ok: false, reason: `redirected to ${finalUrl}` };
+    // Amazon often redirects invalid ASINs to the homepage or a
+    // search page (200 status, but not a product). Require the final
+    // URL to still contain OUR asin — not just any /dp/.
+    const finalUrl = res.url.toLowerCase();
+    if (!finalUrl.includes(asin.toLowerCase())) {
+      return { ok: false, reason: `redirected away → ${res.url}` };
     }
 
-    // Only need the first chunk — 404 copy and product markers both
-    // appear early in the document.
-    const html = (await res.text()).slice(0, 40_000).toLowerCase();
+    const html = (await res.text()).slice(0, 60_000);
+    const lower = html.toLowerCase();
 
-    const badMatch = BAD_PAGE_INDICATORS.find((m) => html.includes(m));
+    // Fail fast on 404 copy.
+    const badMatch = BAD_PAGE_INDICATORS.find((m) => lower.includes(m));
     if (badMatch) {
       return { ok: false, reason: `404 marker: "${badMatch}"` };
     }
 
-    // Positive sanity check: a real product page references the ASIN
-    // (canonical link, productID meta tag, buy-box JSON). If the ASIN
-    // is nowhere in the doc, the page probably isn't for this product.
-    if (!html.includes(asin.toLowerCase())) {
-      return { ok: false, reason: "ASIN not found in document" };
+    // Require at least one positive product-page marker. These only
+    // appear on real product pages — not on Amazon's CAPTCHA page,
+    // not on the homepage, not on search results. If a hallucinated
+    // ASIN lands us on a gateway/error page that happens to mention
+    // the ASIN in some JS context, none of these will match.
+    const lowerAsin = asin.toLowerCase();
+    const positiveMarkers = [
+      `data-asin="${lowerAsin}"`,
+      `id="productTitle"`,
+      `id="asin"`,
+      `id="landingimage"`,
+      `rel="canonical" href="https://www.amazon.com/`, // real product pages always have this
+      `"parentasin"`,
+      `"currentasin"`,
+    ];
+    const matchedMarker = positiveMarkers.find((m) => lower.includes(m));
+    if (!matchedMarker) {
+      return {
+        ok: false,
+        reason: `no product-page markers found (${lower.length}b body)`,
+      };
+    }
+
+    // Extra-strict canonical check: if there's a canonical link, it
+    // MUST reference our ASIN. Amazon canonicalizes to the "real"
+    // product URL, so a mismatch means we landed on a different item.
+    const canonicalMatch = lower.match(
+      /<link[^>]+rel="canonical"[^>]+href="([^"]+)"/
+    );
+    if (canonicalMatch && !canonicalMatch[1].includes(lowerAsin)) {
+      return {
+        ok: false,
+        reason: `canonical points elsewhere: ${canonicalMatch[1]}`,
+      };
     }
 
     return { ok: true };

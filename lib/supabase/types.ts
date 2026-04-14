@@ -173,6 +173,52 @@ export interface Database {
         Update: Partial<Database["public"]["Tables"]["feedback"]["Insert"]>;
         Relationships: [];
       };
+      ai_call_logs: {
+        Row: {
+          id: string;
+          created_at: string;
+          user_id: string | null;
+          fn: string;
+          query: string;
+          model_id: string;
+          duration_ms: number | null;
+          step_count: number | null;
+          web_search_calls: number | null;
+          ai_returned_asin: string | null;
+          ai_returned_image: string | null;
+          asin_verified: boolean | null;
+          asin_fail_reason: string | null;
+          image_verified: boolean | null;
+          image_fail_reason: string | null;
+          final_asin: string | null;
+          final_image: string | null;
+          error: string | null;
+        };
+        Insert: {
+          id?: string;
+          created_at?: string;
+          user_id?: string | null;
+          fn: string;
+          query: string;
+          model_id: string;
+          duration_ms?: number | null;
+          step_count?: number | null;
+          web_search_calls?: number | null;
+          ai_returned_asin?: string | null;
+          ai_returned_image?: string | null;
+          asin_verified?: boolean | null;
+          asin_fail_reason?: string | null;
+          image_verified?: boolean | null;
+          image_fail_reason?: string | null;
+          final_asin?: string | null;
+          final_image?: string | null;
+          error?: string | null;
+        };
+        Update: Partial<
+          Database["public"]["Tables"]["ai_call_logs"]["Insert"]
+        >;
+        Relationships: [];
+      };
     };
     Views: { [key: string]: never };
     Functions: {
@@ -192,6 +238,7 @@ export type ContributorRow = Database["public"]["Tables"]["contributors"]["Row"]
 export type GearItemRow    = Database["public"]["Tables"]["gear_items"]["Row"];
 export type KitEntryRow    = Database["public"]["Tables"]["kit_entries"]["Row"];
 export type UserRow        = Database["public"]["Tables"]["users"]["Row"];
+export type AiCallLogRow   = Database["public"]["Tables"]["ai_call_logs"]["Row"];
 export type AdminNotificationRow =
   Database["public"]["Tables"]["admin_notifications"]["Row"];
 
