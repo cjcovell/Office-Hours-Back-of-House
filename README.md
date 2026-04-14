@@ -13,7 +13,7 @@ gear that viewers rarely get to see.
 
 - **Next.js 15** (App Router) + **React 19** + **TypeScript**
 - **Tailwind v4** + **shadcn/ui** (new-york style, neutral palette)
-- **Supabase**: Postgres + Auth (magic links) + Storage
+- **Supabase**: Postgres + Auth (OTP codes via email) + Storage
 - **supabase-js** for queries; **RLS** for authorization
 - **Vercel** target
 
@@ -37,9 +37,8 @@ app/
   admin/actions.ts             Server actions: approve gear, edit details
   profile/page.tsx             Contributor profile editor (auth-required)
   profile/actions.ts           Server action: update contributor profile
-  login/page.tsx               Magic-link sign-in form
-  login/actions.ts             sendMagicLink + signOut server actions
-  auth/callback/route.ts       OAuth code -> session exchange
+  login/page.tsx               Two-step sign-in: email form, then 6-digit code
+  login/actions.ts             sendOtpCode + verifyOtpCode + signOut actions
   api/gear/search/route.ts     Typeahead endpoint for the kit editor
 components/
   ui/                          shadcn primitives
@@ -156,7 +155,7 @@ Visit:
 - `/contributors/jordan-park` — sample kit page
 - `/gear` — catalog with category filters
 - `/gear/<id>` — detail page with "Also used by"
-- `/login` — magic-link sign-in (check Inbucket at http://127.0.0.1:54324 for local emails)
+- `/login` — sign-in (enter email, receive 6-digit code, verify; local emails go to Inbucket at http://127.0.0.1:54324)
 - `/kit` — kit editor (requires sign-in; admins can use `?as=<slug>`)
 - `/profile` — profile editor (requires sign-in)
 - `/admin` — pending-gear queue (requires admin role)
@@ -303,7 +302,7 @@ success.
 Production is empty (seeds are local-dev only). To start using it:
 
 1. Visit `https://yourdomain.com/login`.
-2. Sign in with your email; click the magic link.
+2. Sign in with your email; type the 6-digit code from the email into the form.
 3. The `on_auth_user_created` trigger creates your `public.users` row
    with `role = 'contributor'`.
 4. Supabase dashboard → SQL Editor, run:
@@ -361,7 +360,7 @@ git push origin main
 | Public contributor pages | **Wired.** Anonymous reads via RLS.                                                          |
 | Public gear catalog      | **Wired.** `?category=` filter, only shows `status='active'`.                                |
 | Typeahead search         | **Wired.** `/api/gear/search?q=...` with ILIKE.                                              |
-| Magic-link sign-in       | **Wired.** `/login` sends, `/auth/callback` exchanges, header shows email + Sign out.        |
+| OTP-code sign-in         | **Wired.** `/login` sends a 6-digit code; second step verifies. No magic links, no prefetch traps. |
 | Suggest new gear         | **Wired.** Includes optional product image upload (5MB cap, gear-images bucket).             |
 | Admin approve gear       | **Wired.** RLS-enforced; non-admins see a "promote yourself" message.                        |
 | Profile editor           | **Wired.** `/profile`. Headshot upload to headshots bucket (path-locked to contributor id).  |
@@ -370,19 +369,44 @@ git push origin main
 
 ## Auth flow
 
-1. User visits a protected page (`/kit`, `/admin`, `/profile`) or clicks
-   **Sign in** in the header → routed to `/login?next=<wherever>`.
-2. They submit their email → `sendMagicLinkAction` calls
-   `supabase.auth.signInWithOtp` with `emailRedirectTo` pointing at
-   `/auth/callback?next=<dest>`. The page swaps to a "Check your email"
-   state.
-3. They click the link in the email (locally, find it in Supabase's
-   built-in Inbucket at `http://127.0.0.1:54324`) → `/auth/callback?code=...`.
-4. The route handler calls `exchangeCodeForSession`, sets cookies via
-   `@supabase/ssr`, and redirects to the original destination.
+We use OTP codes (the 6-digit-code-by-email flow) rather than magic
+links. Email client prefetchers (Gmail, Outlook, corporate security
+scanners) will "preview" links to screen for phishing, which consumes
+the one-time token before the user ever clicks. Codes typed by hand
+can't be prefetched.
+
+1. User visits a protected page (`/kit`, `/admin`, `/profile`) or
+   clicks **Sign in** in the header → routed to `/login?next=<wherever>`.
+2. They submit their email → `sendOtpCodeAction` calls
+   `supabase.auth.signInWithOtp({ email })` **without** an
+   `emailRedirectTo` — that omission is what tells Supabase to send a
+   code instead of a magic link. Supabase emails the 6-digit code.
+3. `/login` swaps to the verify step (`?step=verify&email=...&next=...`)
+   and prompts for the code.
+4. User types the code → `verifyOtpCodeAction` calls
+   `supabase.auth.verifyOtp({ email, token, type: 'email' })`. On
+   success the session cookie is set by `@supabase/ssr` and the user
+   is redirected to `next`.
 5. On every subsequent request, `middleware.ts` refreshes the session
    cookie. The async `<SiteHeader />` reads the user via
    `getCurrentAppUser` and conditionally renders the right nav links.
+
+### Email template (production)
+
+Supabase's default "Magic Link" email template includes both a
+clickable link AND the `{{ .Token }}` variable. Users can use either,
+but you probably want to strip the link so they aren't tempted to
+click — update the template in **Supabase dashboard → Authentication
+→ Emails → Magic Link** to something like:
+
+```html
+<h2>Your sign-in code</h2>
+<p>Your code for Office Hours: Back of House is:</p>
+<p style="font-size: 24px; letter-spacing: 4px; font-weight: bold;">
+  {{ .Token }}
+</p>
+<p>This code expires in 10 minutes. If you didn't request it, ignore this email.</p>
+```
 
 ### One-time setup for the first admin
 
