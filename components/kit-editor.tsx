@@ -1,7 +1,8 @@
 "use client";
 
 import { useState, useTransition } from "react";
-import { Trash2 } from "lucide-react";
+import { Loader2, Sparkles, Trash2 } from "lucide-react";
+import { toast } from "sonner";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -14,6 +15,7 @@ import { GearTypeahead } from "@/components/gear-typeahead";
 import { ImageUploader } from "@/components/image-uploader";
 import {
   addKitEntryAction,
+  quickAddGearAction,
   removeKitEntryAction,
   suggestGearAndAddAction,
 } from "@/app/kit/actions";
@@ -21,6 +23,15 @@ import { GEAR_CATEGORIES, formatCategory } from "@/lib/categories";
 import type { GearItemRow, KitEntryRow } from "@/lib/supabase/types";
 
 type Entry = KitEntryRow & { gear_items: GearItemRow };
+
+type CreateDraft = {
+  name: string;
+  brand: string;
+  model: string;
+  category: string;
+  description: string;
+  image_url: string | null;
+};
 
 export function KitEditor({
   contributorId,
@@ -30,40 +41,59 @@ export function KitEditor({
   initialEntries: Entry[];
 }) {
   const [entries, setEntries] = useState<Entry[]>(initialEntries);
-  const [pickedGear, setPickedGear] = useState<{
-    id: string;
-    name: string;
-    brand: string;
-    model: string;
-  } | null>(null);
-  const [createDraft, setCreateDraft] = useState<{
-    name: string;
-    brand: string;
-    model: string;
-    category: string;
-    description: string;
-    image_url: string | null;
-  } | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const [createDraft, setCreateDraft] = useState<CreateDraft | null>(null);
   const [isPending, startTransition] = useTransition();
 
-  function handleAddPicked(notes: string) {
-    if (!pickedGear) return;
+  /** Add an existing gear item to the kit instantly — no intermediate form. */
+  function handlePick(gear: { id: string; name: string; brand: string }) {
+    const toastId = toast.loading(`Adding ${gear.brand} ${gear.name}…`);
     const fd = new FormData();
     fd.set("contributorId", contributorId);
-    fd.set("gearItemId", pickedGear.id);
-    if (notes) fd.set("notes", notes);
+    fd.set("gearItemId", gear.id);
     startTransition(async () => {
       const res = await addKitEntryAction(fd);
       if ("error" in res && res.error) {
-        setError(res.error);
+        toast.error(res.error, { id: toastId });
         return;
       }
-      setError(null);
-      setPickedGear(null);
+      toast.success(`Added ${gear.brand} ${gear.name}`, { id: toastId });
+      setEntries((cur) => [...cur, res.entry as unknown as Entry]);
     });
   }
 
+  /** Fast path: AI enriches the query and creates + adds in one go. */
+  function handleQuickCreate(query: string) {
+    const toastId = toast.loading(`Adding "${query}"…`);
+    startTransition(async () => {
+      const res = await quickAddGearAction(contributorId, query);
+      if ("error" in res && res.error) {
+        // AI failure → fall back to the manual form.
+        if ("fallbackQuery" in res && res.fallbackQuery) {
+          toast.error(res.error, { id: toastId });
+          setCreateDraft({
+            name: res.fallbackQuery,
+            brand: "",
+            model: "",
+            category: "microphone",
+            description: "",
+            image_url: null,
+          });
+          return;
+        }
+        toast.error(res.error, { id: toastId });
+        return;
+      }
+      const entry = res.entry as unknown as Entry;
+      toast.success(
+        `Added ${entry.gear_items.brand} ${entry.gear_items.name}`,
+        { id: toastId }
+      );
+      setEntries((cur) => [...cur, entry]);
+    });
+  }
+
+  /** Manual-form fallback path. Same shape as the quick path, just with
+   *  user-filled fields instead of AI-generated ones. */
   function handleSuggestNew(notes: string) {
     if (!createDraft) return;
     const fd = new FormData();
@@ -75,49 +105,50 @@ export function KitEditor({
     if (createDraft.description) fd.set("description", createDraft.description);
     if (createDraft.image_url) fd.set("image_url", createDraft.image_url);
     if (notes) fd.set("notes", notes);
+    const toastId = toast.loading("Saving…");
     startTransition(async () => {
       const res = await suggestGearAndAddAction(fd);
       if ("error" in res && res.error) {
-        setError(res.error);
+        toast.error(res.error, { id: toastId });
         return;
       }
-      setError(null);
+      const entry = res.entry as unknown as Entry;
+      toast.success(
+        `Added ${entry.gear_items.brand} ${entry.gear_items.name}`,
+        { id: toastId }
+      );
+      setEntries((cur) => [...cur, entry]);
       setCreateDraft(null);
     });
   }
 
-  function handleRemove(id: string) {
+  function handleRemove(entry: Entry) {
     const fd = new FormData();
-    fd.set("id", id);
+    fd.set("id", entry.id);
     startTransition(async () => {
       const res = await removeKitEntryAction(fd);
       if ("error" in res && res.error) {
-        setError(res.error);
+        toast.error(res.error);
         return;
       }
-      setEntries((cur) => cur.filter((e) => e.id !== id));
+      setEntries((cur) => cur.filter((e) => e.id !== entry.id));
     });
   }
 
   return (
     <div className="space-y-8">
-      {error ? (
-        <div className="rounded-md border border-destructive/30 bg-destructive/5 p-3 text-sm text-destructive">
-          {error}
+      <section className="space-y-3">
+        <div className="flex items-baseline justify-between gap-2">
+          <h2 className="text-lg font-semibold tracking-tight">Add gear</h2>
+          {isPending ? (
+            <span className="inline-flex items-center gap-1.5 text-xs text-muted-foreground">
+              <Loader2 className="size-3 animate-spin" />
+              Working…
+            </span>
+          ) : null}
         </div>
-      ) : null}
 
-      <section className="space-y-4">
-        <h2 className="text-lg font-semibold tracking-tight">Add gear</h2>
-
-        {pickedGear ? (
-          <PickedGearForm
-            gear={pickedGear}
-            onCancel={() => setPickedGear(null)}
-            onSubmit={handleAddPicked}
-            disabled={isPending}
-          />
-        ) : createDraft ? (
+        {createDraft ? (
           <CreateGearForm
             draft={createDraft}
             setDraft={setCreateDraft}
@@ -126,26 +157,18 @@ export function KitEditor({
             disabled={isPending}
           />
         ) : (
-          <GearTypeahead
-            onPick={(gear) =>
-              setPickedGear({
-                id: gear.id,
-                name: gear.name,
-                brand: gear.brand,
-                model: gear.model,
-              })
-            }
-            onCreateNew={(query) =>
-              setCreateDraft({
-                name: query,
-                brand: "",
-                model: "",
-                category: "microphone",
-                description: "",
-                image_url: null,
-              })
-            }
-          />
+          <>
+            <GearTypeahead
+              onPick={handlePick}
+              onCreateNew={handleQuickCreate}
+              disabled={isPending}
+            />
+            <p className="text-xs text-muted-foreground">
+              <Sparkles className="mr-1 inline size-3" />
+              Pick an existing item or hit &ldquo;Quick add&rdquo; and AI
+              fills the details. Keep typing to add more.
+            </p>
+          </>
         )}
       </section>
 
@@ -186,7 +209,7 @@ export function KitEditor({
                   <Button
                     size="icon"
                     variant="ghost"
-                    onClick={() => handleRemove(e.id)}
+                    onClick={() => handleRemove(e)}
                     disabled={isPending}
                     aria-label="Remove from kit"
                   >
@@ -202,59 +225,6 @@ export function KitEditor({
   );
 }
 
-function PickedGearForm({
-  gear,
-  onCancel,
-  onSubmit,
-  disabled,
-}: {
-  gear: { id: string; name: string; brand: string; model: string };
-  onCancel: () => void;
-  onSubmit: (notes: string) => void;
-  disabled: boolean;
-}) {
-  const [notes, setNotes] = useState("");
-  return (
-    <Card>
-      <CardContent className="space-y-4 p-4">
-        <div>
-          <div className="text-xs uppercase tracking-wide text-muted-foreground">
-            {gear.brand}
-          </div>
-          <div className="font-semibold">{gear.name}</div>
-          <div className="text-xs text-muted-foreground">{gear.model}</div>
-        </div>
-        <div className="space-y-2">
-          <Label htmlFor="notes">Personal notes (optional)</Label>
-          <Textarea
-            id="notes"
-            value={notes}
-            onChange={(e) => setNotes(e.target.value)}
-            placeholder="e.g. I use this as my key light."
-          />
-        </div>
-        <div className="flex gap-2">
-          <Button
-            type="button"
-            onClick={() => onSubmit(notes)}
-            disabled={disabled}
-          >
-            Add to kit
-          </Button>
-          <Button
-            type="button"
-            variant="outline"
-            onClick={onCancel}
-            disabled={disabled}
-          >
-            Cancel
-          </Button>
-        </div>
-      </CardContent>
-    </Card>
-  );
-}
-
 function CreateGearForm({
   draft,
   setDraft,
@@ -262,15 +232,8 @@ function CreateGearForm({
   onSubmit,
   disabled,
 }: {
-  draft: {
-    name: string;
-    brand: string;
-    model: string;
-    category: string;
-    description: string;
-    image_url: string | null;
-  };
-  setDraft: (d: typeof draft) => void;
+  draft: CreateDraft;
+  setDraft: (d: CreateDraft) => void;
   onCancel: () => void;
   onSubmit: (notes: string) => void;
   disabled: boolean;
@@ -279,10 +242,11 @@ function CreateGearForm({
   return (
     <Card>
       <CardContent className="space-y-4 p-4">
-        <div className="flex flex-wrap items-start justify-between gap-3">
+        <div className="flex flex-wrap items-center justify-between gap-3">
           <p className="text-sm text-muted-foreground">
-            New gear is saved as <Badge variant="muted">Pending</Badge> until
-            an admin adds the affiliate link.
+            Manual fallback. New gear is saved as{" "}
+            <Badge variant="muted">Pending</Badge> until an admin adds the
+            affiliate link.
           </p>
           <GearAiAssist
             initialQuery={[draft.brand, draft.name, draft.model]

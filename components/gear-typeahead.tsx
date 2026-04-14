@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState, useTransition } from "react";
-import { Loader2, Plus, Search } from "lucide-react";
+import { Loader2, Search, Sparkles } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -21,15 +21,20 @@ type SearchResult = {
 export function GearTypeahead({
   onPick,
   onCreateNew,
+  disabled = false,
 }: {
   onPick: (gear: SearchResult) => void;
   onCreateNew: (query: string) => void;
+  /** When true, the input and the dropdown buttons are disabled (e.g. a
+   *  previous add is in flight). */
+  disabled?: boolean;
 }) {
   const [q, setQ] = useState("");
   const [results, setResults] = useState<SearchResult[]>([]);
   const [open, setOpen] = useState(false);
-  const [isPending, startTransition] = useTransition();
+  const [isFetching, startFetch] = useTransition();
   const containerRef = useRef<HTMLDivElement>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
 
   // Debounced fetch.
   useEffect(() => {
@@ -38,7 +43,7 @@ export function GearTypeahead({
       return;
     }
     const handle = setTimeout(() => {
-      startTransition(async () => {
+      startFetch(async () => {
         try {
           const res = await fetch(
             `/api/gear/search?q=${encodeURIComponent(q)}`,
@@ -69,30 +74,39 @@ export function GearTypeahead({
     q.trim().length >= 2 &&
     !results.some(
       (r) =>
-        `${r.brand} ${r.name}`.toLowerCase().trim() ===
-        q.toLowerCase().trim()
+        `${r.brand} ${r.name}`.toLowerCase().trim() === q.toLowerCase().trim()
     );
+
+  function reset() {
+    setQ("");
+    setResults([]);
+    setOpen(false);
+    // Keep focus so the user can type the next query immediately.
+    inputRef.current?.focus();
+  }
 
   return (
     <div ref={containerRef} className="relative">
       <div className="relative">
         <Search className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
         <Input
+          ref={inputRef}
           value={q}
           onChange={(e) => {
             setQ(e.target.value);
             setOpen(true);
           }}
           onFocus={() => setOpen(true)}
-          placeholder='Search the catalog (e.g. "SM7B", "Sony FX3", "ATEM")'
+          placeholder='Type a gear name, brand, or model — e.g. "Sony FX3", "SM7B"'
           className="pl-9"
+          disabled={disabled}
         />
-        {isPending ? (
+        {isFetching ? (
           <Loader2 className="absolute right-3 top-1/2 size-4 -translate-y-1/2 animate-spin text-muted-foreground" />
         ) : null}
       </div>
 
-      {open && (results.length > 0 || showCreate) ? (
+      {open && !disabled && (results.length > 0 || showCreate) ? (
         <div
           className={cn(
             "absolute z-30 mt-1 w-full overflow-hidden rounded-md border bg-popover shadow-md"
@@ -105,8 +119,7 @@ export function GearTypeahead({
                   type="button"
                   onClick={() => {
                     onPick(r);
-                    setQ("");
-                    setOpen(false);
+                    reset();
                   }}
                   className="flex w-full items-center justify-between gap-3 px-3 py-2 text-left text-sm hover:bg-accent"
                 >
@@ -134,11 +147,11 @@ export function GearTypeahead({
                 className="w-full justify-start rounded-none"
                 onClick={() => {
                   onCreateNew(q);
-                  setOpen(false);
+                  reset();
                 }}
               >
-                <Plus className="size-4" />
-                Create new gear: <span className="font-semibold">{q}</span>
+                <Sparkles className="size-4" />
+                Quick add: <span className="font-semibold">{q}</span>
               </Button>
             </div>
           ) : null}

@@ -18,9 +18,11 @@ export async function POST(req: Request) {
     return Response.json({ error: "Unauthorized" }, { status: 401 });
   }
 
-  // AI calls cost real money; keep the per-user cap tighter than feedback.
+  // AI calls cost real money; keep the per-user cap generous enough for
+  // the fast-path flow (quick-add a dozen items in a minute) but not so
+  // generous that a bug or bot can blow out the bill.
   const rl = rateLimit(user.id, "ai-gear-enrich", {
-    maxRequests: 10,
+    maxRequests: 30,
     windowMs: 60_000,
   });
   if (!rl.allowed) {
