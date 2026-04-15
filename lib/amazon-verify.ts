@@ -1,3 +1,5 @@
+import { searchAmazonViaSerpApi } from "@/lib/serpapi";
+
 /**
  * Verify that an Amazon ASIN resolves to a real product page.
  *
@@ -128,6 +130,50 @@ export async function verifyAsinExists(
           : err.message
         : "unknown error";
     return { ok: false, reason };
+  }
+}
+
+/**
+ * Verify an ASIN exists by searching for it via SerpAPI. More reliable than
+ * direct page scraping because SerpAPI handles Amazon's bot detection and
+ * returns authoritative search-index data.
+ *
+ * Key safety rule: if SerpAPI itself errors (network, rate limit, missing
+ * key), we return ok:true — ambiguity preserves data, never destroys it.
+ * The admin can re-run verification later.
+ */
+export async function verifyAsinViaSerpApi(
+  asin: string
+): Promise<AsinVerification> {
+  if (!/^[A-Z0-9]{10}$/.test(asin)) {
+    return { ok: false, reason: "malformed ASIN" };
+  }
+
+  try {
+    const result = await searchAmazonViaSerpApi(asin);
+
+    if (!result) {
+      return { ok: false, reason: "ASIN not found in Amazon search" };
+    }
+
+    if (result.asin.toUpperCase() === asin.toUpperCase()) {
+      return { ok: true };
+    }
+
+    // SerpAPI returned a result but with a different ASIN — the search
+    // matched something else. Treat as not found.
+    return {
+      ok: false,
+      reason: `search returned different ASIN: ${result.asin}`,
+    };
+  } catch (err) {
+    // SerpAPI failure (network, rate limit, missing key). Preserve data —
+    // a transient API error should never clear a potentially valid ASIN.
+    console.warn(
+      `[verifyAsinViaSerpApi] SerpAPI error for ${asin}, preserving data:`,
+      err instanceof Error ? err.message : err
+    );
+    return { ok: true };
   }
 }
 
