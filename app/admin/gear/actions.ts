@@ -6,7 +6,7 @@ import { redirect } from "next/navigation";
 import { lookupAmazonDetails } from "@/lib/ai/gear-enrich";
 import {
   isAmazonImageUrl,
-  verifyAsinExists,
+  verifyAsinViaSerpApi,
   verifyImageUrl,
 } from "@/lib/amazon-verify";
 import { rateLimit } from "@/lib/rate-limit";
@@ -239,7 +239,7 @@ export async function verifyGearAsinAction(gearId: string) {
 
   const [asinVerdict, imageVerdict] = await Promise.all([
     gear.asin
-      ? verifyAsinExists(gear.asin)
+      ? verifyAsinViaSerpApi(gear.asin)
       : Promise.resolve({ ok: true as const }),
     shouldVerifyImage
       ? verifyImageUrl(gear.image_url!)
