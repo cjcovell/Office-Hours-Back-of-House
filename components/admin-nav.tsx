@@ -10,6 +10,7 @@ const ITEMS = [
   { href: "/admin/feedback", label: "Feedback" },
   { href: "/admin/users", label: "Users" },
   { href: "/admin/gear", label: "All gear" },
+  { href: "/admin/ai-logs", label: "Enrichment logs" },
 ];
 
 export function AdminNav() {
