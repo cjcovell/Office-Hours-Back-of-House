@@ -2,6 +2,7 @@ import Link from "next/link";
 
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent } from "@/components/ui/card";
+import { buildAmazonUrl } from "@/lib/amazon";
 import { createSupabaseAdminClient } from "@/lib/supabase/admin";
 import { getCurrentAppUser } from "@/lib/supabase/auth";
 import { redirect } from "next/navigation";
@@ -255,9 +256,13 @@ function FinalAsinCell({ row }: { row: AiCallLogRow }) {
   if (!row.final_asin) {
     return <span className="text-muted-foreground">—</span>;
   }
+  const url = buildAmazonUrl(row.final_asin);
+  if (!url) {
+    return <span className="font-mono text-xs">{row.final_asin}</span>;
+  }
   return (
     <Link
-      href={`https://www.amazon.com/dp/${row.final_asin}`}
+      href={url}
       target="_blank"
       rel="noopener noreferrer"
       className="font-mono text-xs underline hover:text-foreground"
@@ -384,14 +389,21 @@ function LogCard({ row }: { row: AiCallLogRow }) {
           {row.final_asin ? (
             <span className="flex items-center gap-1">
               Saved:{" "}
-              <Link
-                href={`https://www.amazon.com/dp/${row.final_asin}`}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="font-mono underline hover:text-foreground"
-              >
-                {row.final_asin}
-              </Link>
+              {(() => {
+                const url = buildAmazonUrl(row.final_asin);
+                return url ? (
+                  <Link
+                    href={url}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="font-mono underline hover:text-foreground"
+                  >
+                    {row.final_asin}
+                  </Link>
+                ) : (
+                  <span className="font-mono">{row.final_asin}</span>
+                );
+              })()}
             </span>
           ) : (
             <span>Saved: —</span>

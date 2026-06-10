@@ -136,11 +136,10 @@ export async function lookupGearAmazonAction(
 
   let lookup;
   try {
-    lookup = await lookupAmazonDetails({
-      brand: gear.brand,
-      name: gear.name,
-      model: gear.model,
-    });
+    lookup = await lookupAmazonDetails(
+      { brand: gear.brand, name: gear.name, model: gear.model },
+      { userId: me.authId }
+    );
   } catch (err) {
     return {
       error: err instanceof Error ? err.message : "Amazon lookup failed",
@@ -252,7 +251,12 @@ export async function verifyGearAsinAction(gearId: string) {
 
   if (gear.asin && !asinVerdict.ok) {
     update.asin = null;
-    update.image_url = null; // coupled clear — same AI response
+    // Only clear the image along with the ASIN if it's from Amazon's
+    // CDN (i.e., it came from the same AI/SerpAPI response as the bad
+    // ASIN). Admin-uploaded Supabase images are never touched.
+    if (gear.image_url && isAmazonImageUrl(gear.image_url)) {
+      update.image_url = null;
+    }
     clearedAsin = gear.asin;
     reasons.push(
       `asin: ${"reason" in asinVerdict ? asinVerdict.reason : "invalid"}`
@@ -264,8 +268,20 @@ export async function verifyGearAsinAction(gearId: string) {
     );
   }
 
+  // If SerpAPI couldn't be reached (missing key, network error), the
+  // verdict comes back ok:true + skipped:true. Nothing is cleared, but
+  // we tell the admin the check was inconclusive rather than "valid."
+  const asinSkipped =
+    asinVerdict && "skipped" in asinVerdict && asinVerdict.skipped;
+
   if (Object.keys(update).length === 0) {
-    return { ok: true as const, valid: true as const };
+    return {
+      ok: true as const,
+      valid: asinSkipped ? (null as null) : (true as const),
+      reason: asinSkipped
+        ? `SerpAPI unavailable — ASIN not actually checked (${"reason" in asinVerdict ? asinVerdict.reason : "unknown"})`
+        : undefined,
+    };
   }
 
   const { error: writeErr } = await client
@@ -326,7 +342,7 @@ export async function clearAllAiSourcedDataAction(
   ]);
 
   const amazonImgIds = (imgsToClear ?? [])
-    .filter((r) => r.image_url && /amazon/i.test(r.image_url))
+    .filter((r) => r.image_url && isAmazonImageUrl(r.image_url))
     .map((r) => r.id);
 
   // Clear all ASINs.

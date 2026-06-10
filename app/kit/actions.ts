@@ -139,7 +139,7 @@ export async function quickAddGearAction(
 
   let enriched;
   try {
-    enriched = await enrichGearFromQuery(trimmed);
+    enriched = await enrichGearFromQuery(trimmed, { userId: user.id });
   } catch (err) {
     const msg = err instanceof Error ? err.message : "AI enrichment failed";
     return {

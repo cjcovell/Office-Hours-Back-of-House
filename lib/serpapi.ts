@@ -102,6 +102,10 @@ export async function searchAmazonViaSerpApi(
     } catch {
       /* ignore */
     }
+    // Redact the API key if SerpAPI echoes it back in the error body.
+    if (apiKey && detail.includes(apiKey)) {
+      detail = detail.replaceAll(apiKey, "[REDACTED]");
+    }
     throw new SerpApiError(
       `SerpAPI HTTP ${res.status}${detail ? `: ${detail}` : ""}`,
       res.status

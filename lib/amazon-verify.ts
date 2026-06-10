@@ -56,11 +56,16 @@ export async function verifyAsinViaSerpApi(
   } catch (err) {
     // SerpAPI failure (network, rate limit, missing key). Preserve data —
     // a transient API error should never clear a potentially valid ASIN.
+    // But return a distinct shape so callers can tell "verified ok" apart
+    // from "couldn't check."
+    const msg = err instanceof Error ? err.message : String(err);
     console.warn(
-      `[verifyAsinViaSerpApi] SerpAPI error for ${asin}, preserving data:`,
-      err instanceof Error ? err.message : err
+      `[verifyAsinViaSerpApi] SerpAPI error for ${asin}, preserving data: ${msg}`
     );
-    return { ok: true };
+    return { ok: true, skipped: true, reason: msg } as AsinVerification & {
+      skipped: true;
+      reason: string;
+    };
   }
 }
 
@@ -80,6 +85,9 @@ export async function verifyImageUrl(url: string): Promise<AsinVerification> {
     const parsed = new URL(url);
     if (parsed.protocol !== "https:" && parsed.protocol !== "http:") {
       return { ok: false, reason: `bad protocol: ${parsed.protocol}` };
+    }
+    if (!isAmazonImageUrl(url)) {
+      return { ok: false, reason: `host ${parsed.hostname} is not an Amazon CDN` };
     }
   } catch {
     return { ok: false, reason: "malformed URL" };

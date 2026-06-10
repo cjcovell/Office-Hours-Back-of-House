@@ -13,7 +13,6 @@ import {
   searchAmazonViaSerpApi,
 } from "@/lib/serpapi";
 import { createSupabaseAdminClient } from "@/lib/supabase/admin";
-import { getCurrentAppUser } from "@/lib/supabase/auth";
 
 /**
  * Gear enrichment pipeline.
@@ -135,11 +134,10 @@ Rules:
  * the image URL is HEAD-verified against Amazon's CDN before being
  * returned. Nulls if nothing matched.
  */
-export async function lookupAmazonDetails(params: {
-  brand: string;
-  name: string;
-  model: string;
-}): Promise<AmazonLookupResult> {
+export async function lookupAmazonDetails(
+  params: { brand: string; name: string; model: string },
+  opts?: { userId?: string | null }
+): Promise<AmazonLookupResult> {
   const { brand, name, model } = params;
   if (!brand.trim() || !name.trim()) {
     throw new Error("brand and name are required");
@@ -157,6 +155,7 @@ export async function lookupAmazonDetails(params: {
     void logAiCall({
       fn: "lookupAmazonDetails",
       query,
+      userId: opts?.userId,
       durationMs: Date.now() - start,
       error: msg,
     });
@@ -164,10 +163,10 @@ export async function lookupAmazonDetails(params: {
   }
 
   if (!serp) {
-    // No results for this query. Not an error — just nothing to save.
     void logAiCall({
       fn: "lookupAmazonDetails",
       query,
+      userId: opts?.userId,
       durationMs: Date.now() - start,
       aiReturnedAsin: null,
       aiReturnedImage: null,
@@ -185,6 +184,7 @@ export async function lookupAmazonDetails(params: {
   void logAiCall({
     fn: "lookupAmazonDetails",
     query,
+    userId: opts?.userId,
     durationMs: Date.now() - start,
     aiReturnedAsin: serp.asin,
     aiReturnedImage: serp.imageUrl,
@@ -207,7 +207,8 @@ export async function lookupAmazonDetails(params: {
  * with asin/imageUrl as null — admin can enter them manually.
  */
 export async function enrichGearFromQuery(
-  query: string
+  query: string,
+  opts?: { userId?: string | null }
 ): Promise<GearEnrichResult> {
   const trimmed = query.trim();
   if (!trimmed) throw new Error("Query is required");
@@ -230,15 +231,13 @@ export async function enrichGearFromQuery(
     void logAiCall({
       fn: "enrichGearFromQuery",
       query: trimmed,
+      userId: opts?.userId,
       durationMs: Date.now() - start,
       error: msg,
     });
     throw err;
   }
 
-  // Step 2: SerpAPI lookup using the canonicalized brand/model.
-  // SerpAPI failures here are non-fatal — we still return the text
-  // fields so the admin has something to work with.
   const searchQuery = buildAmazonSearchQuery({
     brand: textResult.brand,
     name: textResult.name,
@@ -255,10 +254,6 @@ export async function enrichGearFromQuery(
       serpImage = serp.imageUrl;
     }
   } catch (err) {
-    // All lookup errors (SerpAPI or otherwise) are swallowed so the
-    // text fields still come back — the admin can fill ASIN manually.
-    // The error is recorded in ai_call_logs either way, so bugs stay
-    // visible on /admin/ai-logs.
     serpError = err instanceof Error ? err.message : "unknown";
     const kind = err instanceof SerpApiError ? "SerpAPI" : "Unexpected";
     console.warn(
@@ -266,7 +261,6 @@ export async function enrichGearFromQuery(
     );
   }
 
-  // Step 3: Verify the image URL before saving it.
   const [finalImage, imageVerdict] = await verifyImageWithDiagnostics(
     serpImage,
     searchQuery
@@ -275,6 +269,7 @@ export async function enrichGearFromQuery(
   void logAiCall({
     fn: "enrichGearFromQuery",
     query: trimmed,
+    userId: opts?.userId,
     durationMs: Date.now() - start,
     aiReturnedAsin: serpAsin,
     aiReturnedImage: serpImage,
@@ -328,6 +323,7 @@ async function logAiCall(params: {
   fn: string;
   query: string;
   durationMs: number;
+  userId?: string | null;
   aiReturnedAsin?: string | null;
   aiReturnedImage?: string | null;
   imageVerdict?: AsinVerification | { ok: true };
@@ -336,11 +332,10 @@ async function logAiCall(params: {
   error?: string;
 }): Promise<void> {
   try {
-    const me = await getCurrentAppUser().catch(() => null);
     const client = createSupabaseAdminClient();
 
     await client.from("ai_call_logs").insert({
-      user_id: me?.authId ?? null,
+      user_id: params.userId ?? null,
       fn: params.fn,
       query: params.query,
       model_id: params.fn === "enrichGearFromQuery" ? TEXT_MODEL_ID : "serpapi",

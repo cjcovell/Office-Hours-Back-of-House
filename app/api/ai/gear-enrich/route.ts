@@ -51,7 +51,9 @@ export async function POST(req: Request) {
   }
 
   try {
-    const result = await enrichGearFromQuery(parsed.data.query);
+    const result = await enrichGearFromQuery(parsed.data.query, {
+      userId: user.id,
+    });
     return Response.json({ result });
   } catch (err) {
     const msg = err instanceof Error ? err.message : "AI call failed";
