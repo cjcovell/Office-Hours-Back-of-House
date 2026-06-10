@@ -4,7 +4,6 @@ import { z } from "zod";
 
 import {
   type AsinVerification,
-  verifyAsinExists,
   verifyImageUrl,
 } from "@/lib/amazon-verify";
 import { GEAR_CATEGORIES } from "@/lib/categories";
@@ -29,10 +28,19 @@ import { getCurrentAppUser } from "@/lib/supabase/auth";
  *    canonical brand/model from the AI (or from an existing gear row),
  *    runs an actual Amazon search and returns real ASIN + image URL
  *    from search results.
- *  - **Amazon HTTP verification** — final sanity check. Both the ASIN
- *    and the image URL are HEAD/GET-tested against amazon.com before
- *    writing to the DB. SerpAPI is reliable, but products get delisted
- *    and stale results linger.
+ *  - **Image verification** — a cheap HEAD check against Amazon's CDN
+ *    before saving an image URL. Broken images directly degrade the UI
+ *    (blue-? placeholders), and the check is reliable: CDNs don't
+ *    bot-block HEAD requests the way product pages do.
+ *
+ * ASINs from SerpAPI are trusted as-is: they come from a live Amazon
+ * search seconds earlier, which is stronger evidence than anything we
+ * can get by re-fetching amazon.com from a datacenter IP (Amazon
+ * serves bots different HTML, which gave us both false positives and
+ * false negatives when we scrape-verified). Stale/delisted ASINs are
+ * caught by the admin review step (the pending row shows a clickable
+ * URL preview) and by the bulk "Verify existing" action, which checks
+ * via SerpAPI search.
  *
  * We previously tried AI + built-in web_search. Models hallucinated
  * ASINs even with tool access, and server-side Amazon fetches return
@@ -123,8 +131,9 @@ Rules:
 
 /**
  * Look up a product on Amazon via SerpAPI given its canonical
- * brand/name/model. Returns a verified ASIN + image URL, or nulls if
- * nothing matched or verification failed.
+ * brand/name/model. The ASIN comes straight from live search results;
+ * the image URL is HEAD-verified against Amazon's CDN before being
+ * returned. Nulls if nothing matched.
  */
 export async function lookupAmazonDetails(params: {
   brand: string;
@@ -168,8 +177,8 @@ export async function lookupAmazonDetails(params: {
     return { asin: null, imageUrl: null };
   }
 
-  const [cleaned, verdicts] = await verifyAndCleanAsinWithDiagnostics(
-    { asin: serp.asin, imageUrl: serp.imageUrl },
+  const [finalImage, imageVerdict] = await verifyImageWithDiagnostics(
+    serp.imageUrl,
     query
   );
 
@@ -179,13 +188,12 @@ export async function lookupAmazonDetails(params: {
     durationMs: Date.now() - start,
     aiReturnedAsin: serp.asin,
     aiReturnedImage: serp.imageUrl,
-    asinVerdict: verdicts.asin,
-    imageVerdict: verdicts.image,
-    finalAsin: cleaned.asin,
-    finalImage: cleaned.imageUrl,
+    imageVerdict,
+    finalAsin: serp.asin,
+    finalImage,
   });
 
-  return cleaned;
+  return { asin: serp.asin, imageUrl: finalImage };
 }
 
 // ---------- Full enrichment (kit-editor quick-add) --------------------------
@@ -247,21 +255,20 @@ export async function enrichGearFromQuery(
       serpImage = serp.imageUrl;
     }
   } catch (err) {
+    // All lookup errors (SerpAPI or otherwise) are swallowed so the
+    // text fields still come back — the admin can fill ASIN manually.
+    // The error is recorded in ai_call_logs either way, so bugs stay
+    // visible on /admin/ai-logs.
     serpError = err instanceof Error ? err.message : "unknown";
-    if (!(err instanceof SerpApiError)) {
-      // Re-throw unexpected errors so we notice bugs; SerpApiErrors are
-      // logged and swallowed so the text fields still come back.
-      console.warn(
-        `[gear-enrich] Non-SerpApi error during lookup: ${serpError}`
-      );
-    } else {
-      console.warn(`[gear-enrich] SerpAPI error for "${searchQuery}": ${serpError}`);
-    }
+    const kind = err instanceof SerpApiError ? "SerpAPI" : "Unexpected";
+    console.warn(
+      `[gear-enrich] ${kind} error during lookup for "${searchQuery}": ${serpError}`
+    );
   }
 
-  // Step 3: Verify whatever SerpAPI gave us.
-  const [cleaned, verdicts] = await verifyAndCleanAsinWithDiagnostics(
-    { asin: serpAsin, imageUrl: serpImage },
+  // Step 3: Verify the image URL before saving it.
+  const [finalImage, imageVerdict] = await verifyImageWithDiagnostics(
+    serpImage,
     searchQuery
   );
 
@@ -271,75 +278,40 @@ export async function enrichGearFromQuery(
     durationMs: Date.now() - start,
     aiReturnedAsin: serpAsin,
     aiReturnedImage: serpImage,
-    asinVerdict: verdicts.asin,
-    imageVerdict: verdicts.image,
-    finalAsin: cleaned.asin,
-    finalImage: cleaned.imageUrl,
+    imageVerdict,
+    finalAsin: serpAsin,
+    finalImage,
     error: serpError,
   });
 
   return {
     ...textResult,
-    asin: cleaned.asin,
-    imageUrl: cleaned.imageUrl,
+    asin: serpAsin,
+    imageUrl: finalImage,
   };
 }
 
 // ---------- Verification ----------------------------------------------------
 
 /**
- * Run the proposed ASIN + image URL through real HTTP checks against
- * amazon.com. Returns the cleaned values AND the individual verdicts
- * so the caller can persist them for telemetry.
+ * HEAD-check an image URL against Amazon's CDN before saving. Returns
+ * the URL (or null if it didn't verify) plus the verdict for telemetry.
  *
- * Coupling rule: if the ASIN fails verification, also null out the
- * image — they were returned together by the same SerpAPI result, so
- * a bad ASIN means a bad/wrong image. If only the image fails (ASIN
- * verified fine), keep the ASIN.
+ * ASINs are intentionally NOT re-verified here — see the module header.
  */
-async function verifyAndCleanAsinWithDiagnostics<
-  T extends { asin: string | null; imageUrl: string | null },
->(
-  result: T,
+async function verifyImageWithDiagnostics(
+  imageUrl: string | null,
   context: string
-): Promise<
-  [
-    T,
-    {
-      asin: AsinVerification | { ok: true };
-      image: AsinVerification | { ok: true };
-    },
-  ]
-> {
-  const [asinVerdict, imageVerdict] = await Promise.all([
-    result.asin
-      ? verifyAsinExists(result.asin)
-      : Promise.resolve({ ok: true as const }),
-    result.imageUrl
-      ? verifyImageUrl(result.imageUrl)
-      : Promise.resolve({ ok: true as const }),
-  ]);
+): Promise<[string | null, AsinVerification | { ok: true }]> {
+  if (!imageUrl) return [null, { ok: true }];
 
-  let asin = result.asin;
-  let imageUrl = result.imageUrl;
+  const verdict = await verifyImageUrl(imageUrl);
+  if (verdict.ok) return [imageUrl, verdict];
 
-  if (result.asin && !asinVerdict.ok) {
-    console.warn(
-      `[gear-enrich] Discarding unverifiable ASIN ${result.asin} for "${context}": ${"reason" in asinVerdict ? asinVerdict.reason : ""} (also clearing image)`
-    );
-    asin = null;
-    imageUrl = null;
-  } else if (result.imageUrl && !imageVerdict.ok) {
-    console.warn(
-      `[gear-enrich] Discarding unverifiable image ${result.imageUrl} for "${context}": ${"reason" in imageVerdict ? imageVerdict.reason : ""}`
-    );
-    imageUrl = null;
-  }
-
-  return [
-    { ...result, asin, imageUrl },
-    { asin: asinVerdict, image: imageVerdict },
-  ];
+  console.warn(
+    `[gear-enrich] Discarding unverifiable image ${imageUrl} for "${context}": ${verdict.reason}`
+  );
+  return [null, verdict];
 }
 
 // ---------- Telemetry ------------------------------------------------------
@@ -358,7 +330,6 @@ async function logAiCall(params: {
   durationMs: number;
   aiReturnedAsin?: string | null;
   aiReturnedImage?: string | null;
-  asinVerdict?: AsinVerification | { ok: true };
   imageVerdict?: AsinVerification | { ok: true };
   finalAsin?: string | null;
   finalImage?: string | null;
@@ -378,14 +349,10 @@ async function logAiCall(params: {
       web_search_calls: null,
       ai_returned_asin: params.aiReturnedAsin ?? null,
       ai_returned_image: params.aiReturnedImage ?? null,
-      asin_verified:
-        params.asinVerdict === undefined || !params.aiReturnedAsin
-          ? null
-          : params.asinVerdict.ok,
-      asin_fail_reason:
-        params.asinVerdict && !params.asinVerdict.ok && "reason" in params.asinVerdict
-          ? params.asinVerdict.reason
-          : null,
+      // ASINs come from SerpAPI's live search and aren't independently
+      // re-verified (see module header), so asin_verified stays null.
+      asin_verified: null,
+      asin_fail_reason: null,
       image_verified:
         params.imageVerdict === undefined || !params.aiReturnedImage
           ? null

@@ -455,10 +455,13 @@ into a structured catalog entry by running two stages in sequence:
    brand/model from stage 1 and runs a real Amazon search. Returns
    real ASINs and real image URLs from the first organic (non-
    sponsored) result.
-3. **Amazon HTTP verification** (`lib/amazon-verify.ts`) — HEAD/GET
-   against amazon.com for both ASIN and image URL. Anything that
-   doesn't resolve to a real product page / real image gets nulled
-   before it hits the DB.
+3. **Image verification** (`lib/amazon-verify.ts`) — HEAD check
+   against Amazon's CDN before an image URL is saved; broken images
+   get nulled. ASINs are trusted as-is (they come from a live Amazon
+   search — re-scraping amazon.com from a datacenter IP is less
+   reliable than the search itself). Stale/delisted ASINs are caught
+   at admin review and by the bulk **Verify existing ASINs** action,
+   which re-checks via SerpAPI search.
 
 > **Earlier attempts:** we first tried a single LLM call with
 > Anthropic's built-in `web_search` tool. Models hallucinated ASINs
@@ -487,8 +490,8 @@ into a structured catalog entry by running two stages in sequence:
 | Model       | AI (Haiku), best effort                         |
 | Category    | AI (Haiku), constrained to `GEAR_CATEGORIES`    |
 | Description | AI (Haiku); factual, no marketing copy          |
-| **ASIN**    | SerpAPI Amazon Search → HTTP-verified           |
-| **Image**   | SerpAPI thumbnail → HTTP-verified               |
+| **ASIN**    | SerpAPI Amazon Search (live results)            |
+| **Image**   | SerpAPI thumbnail → HEAD-verified on the CDN    |
 
 If SerpAPI finds no match (obscure product, typo in query), or if
 verification fails, ASIN + image come back null and the admin enters
@@ -500,8 +503,9 @@ flipping status to `active`.
 An amber **Amazon enrichment tools** card at the top of the list
 exposes three actions:
 
-- **Verify existing ASINs** — HEAD-checks every saved ASIN against
-  amazon.com, clears the ones that don't resolve (and their images).
+- **Verify existing ASINs** — re-checks every saved ASIN via SerpAPI
+  Amazon search, clears the ones that no longer resolve (and their
+  images). One SerpAPI credit per item.
 - **Backfill missing** — runs SerpAPI lookup + verify for every row
   missing an ASIN or image. Sequential, rate-limited, pausable.
 - **Clear all AI data** (danger zone) — wipes every ASIN and every

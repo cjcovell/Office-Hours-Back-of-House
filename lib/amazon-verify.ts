@@ -1,137 +1,24 @@
 import { searchAmazonViaSerpApi } from "@/lib/serpapi";
 
 /**
- * Verify that an Amazon ASIN resolves to a real product page.
+ * Amazon data verification helpers.
  *
- * The AI lookup, even with web_search grounded to amazon.com, sometimes
- * hands back 10-char strings that match the ASIN shape but don't exist
- * on Amazon. Symptoms: affiliate links 404 or redirect to the homepage.
- *
- * We don't have PA-API access (requires qualifying as an affiliate), so
- * there's no clean "does this ASIN exist" endpoint. Instead, we fetch
- * the /dp/ page and sniff the response for Amazon's 404 markers. This
- * isn't perfect — Amazon changes copy, may serve different pages by
- * region, and aggressively varies markup — but it reliably catches the
- * common "ASIN doesn't exist" case which is what the model produces
- * when it hallucinates.
- *
- * Usage: only call this after the AI returns an ASIN. It adds ~1s of
- * latency per call; at our rate limits that's well within tolerance.
+ * History note: this module used to scrape amazon.com/dp/<ASIN> pages
+ * and sniff for 404 markers. That approach is gone — Amazon serves
+ * datacenter IPs different HTML than browsers (CAPTCHA/gateway pages),
+ * which produced both false positives (hallucinated ASINs passing) and
+ * false negatives (real ASINs being discarded). ASIN existence is now
+ * checked via SerpAPI search (verifyAsinViaSerpApi); image URLs are
+ * still HEAD-checked directly because CDNs don't bot-block.
  */
 
-// Text that shows up on Amazon's 404 / "not a functioning page" responses,
-// which often return HTTP 200 (making status-code checks alone insufficient).
-//
-// These are case-insensitive substrings (we lowercase the HTML before
-// matching). Avoid matching on punctuation — Amazon's 404 renders as
-// <h1>Sorry</h1><h2>we couldn't find that page</h2> so any string with
-// a comma between "Sorry" and "we couldn't" will silently miss.
-const BAD_PAGE_INDICATORS = [
-  "couldn't find that page", // the headline on Amazon's 404
-  "meet the dogs of amazon", // the Easter-egg caption, 404-only
-  "try searching or go to",
-  "the web address you entered is not a functioning page",
-  "we're sorry. the web address you entered",
-  "page you requested",
-  "this page isn't available",
-  "looking for something",
-];
-
-const REQUEST_HEADERS = {
-  // Realistic browser UA — Amazon returns minimal HTML to obvious bots.
-  "User-Agent":
-    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-  Accept:
-    "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-  "Accept-Language": "en-US,en;q=0.9",
-};
+// Realistic browser UA — some CDNs reject requests with no/odd UAs.
+const BROWSER_USER_AGENT =
+  "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
 
 export type AsinVerification =
   | { ok: true }
   | { ok: false; reason: string };
-
-export async function verifyAsinExists(
-  asin: string
-): Promise<AsinVerification> {
-  if (!/^[A-Z0-9]{10}$/.test(asin)) {
-    return { ok: false, reason: "malformed ASIN" };
-  }
-
-  try {
-    const res = await fetch(`https://www.amazon.com/dp/${asin}`, {
-      redirect: "follow",
-      headers: REQUEST_HEADERS,
-      signal: AbortSignal.timeout(10_000),
-    });
-
-    if (!res.ok) {
-      return { ok: false, reason: `HTTP ${res.status}` };
-    }
-
-    // Amazon often redirects invalid ASINs to the homepage or a
-    // search page (200 status, but not a product). Require the final
-    // URL to still contain OUR asin — not just any /dp/.
-    const finalUrl = res.url.toLowerCase();
-    if (!finalUrl.includes(asin.toLowerCase())) {
-      return { ok: false, reason: `redirected away → ${res.url}` };
-    }
-
-    const html = (await res.text()).slice(0, 60_000);
-    const lower = html.toLowerCase();
-
-    // Fail fast on 404 copy.
-    const badMatch = BAD_PAGE_INDICATORS.find((m) => lower.includes(m));
-    if (badMatch) {
-      return { ok: false, reason: `404 marker: "${badMatch}"` };
-    }
-
-    // Require at least one positive product-page marker. These only
-    // appear on real product pages — not on Amazon's CAPTCHA page,
-    // not on the homepage, not on search results. If a hallucinated
-    // ASIN lands us on a gateway/error page that happens to mention
-    // the ASIN in some JS context, none of these will match.
-    const lowerAsin = asin.toLowerCase();
-    const positiveMarkers = [
-      `data-asin="${lowerAsin}"`,
-      `id="productTitle"`,
-      `id="asin"`,
-      `id="landingimage"`,
-      `rel="canonical" href="https://www.amazon.com/`, // real product pages always have this
-      `"parentasin"`,
-      `"currentasin"`,
-    ];
-    const matchedMarker = positiveMarkers.find((m) => lower.includes(m));
-    if (!matchedMarker) {
-      return {
-        ok: false,
-        reason: `no product-page markers found (${lower.length}b body)`,
-      };
-    }
-
-    // Extra-strict canonical check: if there's a canonical link, it
-    // MUST reference our ASIN. Amazon canonicalizes to the "real"
-    // product URL, so a mismatch means we landed on a different item.
-    const canonicalMatch = lower.match(
-      /<link[^>]+rel="canonical"[^>]+href="([^"]+)"/
-    );
-    if (canonicalMatch && !canonicalMatch[1].includes(lowerAsin)) {
-      return {
-        ok: false,
-        reason: `canonical points elsewhere: ${canonicalMatch[1]}`,
-      };
-    }
-
-    return { ok: true };
-  } catch (err) {
-    const reason =
-      err instanceof Error
-        ? err.name === "TimeoutError"
-          ? "verification timed out"
-          : err.message
-        : "unknown error";
-    return { ok: false, reason };
-  }
-}
 
 /**
  * Verify an ASIN exists by searching for it via SerpAPI. More reliable than
@@ -202,7 +89,7 @@ export async function verifyImageUrl(url: string): Promise<AsinVerification> {
     const res = await fetch(url, {
       method: "HEAD",
       redirect: "follow",
-      headers: { "User-Agent": REQUEST_HEADERS["User-Agent"] },
+      headers: { "User-Agent": BROWSER_USER_AGENT },
       signal: AbortSignal.timeout(6000),
     });
 

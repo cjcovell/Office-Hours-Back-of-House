@@ -88,6 +88,10 @@ export function AdminBulkBackfill() {
 
   const pausedRef = useRef(false);
   const cancelledRef = useRef(false);
+  // Which run is active. resume() can't infer this from list membership:
+  // an item with an ASIN but no image appears in BOTH `missing` and
+  // `withAsin`, so membership checks would mislabel the phase.
+  const modeRef = useRef<"verify" | "backfill">("backfill");
 
   const loadLists = useCallback(async () => {
     setLoadError(null);
@@ -151,6 +155,7 @@ export function AdminBulkBackfill() {
     if (withAsin.length === 0) return;
     pausedRef.current = false;
     cancelledRef.current = false;
+    modeRef.current = "verify";
     setPhase("verify");
 
     const result = await processQueue(
@@ -205,6 +210,7 @@ export function AdminBulkBackfill() {
     if (missing.length === 0) return;
     pausedRef.current = false;
     cancelledRef.current = false;
+    modeRef.current = "backfill";
     setPhase("backfill");
 
     const result = await processQueue(
@@ -254,11 +260,7 @@ export function AdminBulkBackfill() {
   }
   function resume() {
     pausedRef.current = false;
-    setPhase(
-      activeIds.some((id) => withAsin.find((w) => w.id === id))
-        ? "verify"
-        : "backfill"
-    );
+    setPhase(modeRef.current);
   }
   function cancel() {
     cancelledRef.current = true;
@@ -381,9 +383,10 @@ export function AdminBulkBackfill() {
               <h4 className="text-sm font-medium">Verify existing ASINs</h4>
             </div>
             <p className="text-xs text-muted-foreground">
-              Check each saved ASIN against amazon.com. Rows whose ASINs
-              don&rsquo;t resolve get their ASIN + image cleared so
-              Backfill can retry them.
+              Re-check each saved ASIN via SerpAPI Amazon search. Rows
+              whose ASINs no longer resolve get their ASIN + image
+              cleared so Backfill can retry them. Costs one SerpAPI
+              credit per item.
             </p>
             <div className="flex items-center justify-between">
               <span className="text-xs text-muted-foreground">

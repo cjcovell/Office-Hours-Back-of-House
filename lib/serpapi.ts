@@ -68,10 +68,11 @@ export class SerpApiError extends Error {
  * result with an ASIN. Falls back to sponsored results if no organic
  * results have ASINs. Returns null if nothing matches.
  *
- * The caller is responsible for validating the ASIN/image URL against
- * amazon.com via verifyAsinExists / verifyImageUrl before saving —
- * products get delisted, discontinued ASINs can linger in search
- * results for weeks.
+ * Callers should HEAD-check the image URL (lib/amazon-verify.ts
+ * verifyImageUrl) before saving it. The ASIN itself is trusted — it
+ * comes from a live search — but stale/delisted products can linger
+ * in results, which the admin review step and the bulk
+ * verifyAsinViaSerpApi action catch.
  */
 export async function searchAmazonViaSerpApi(
   query: string

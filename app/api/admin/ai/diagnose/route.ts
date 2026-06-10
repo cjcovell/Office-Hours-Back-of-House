@@ -1,7 +1,4 @@
-import {
-  verifyAsinExists,
-  verifyImageUrl,
-} from "@/lib/amazon-verify";
+import { verifyImageUrl } from "@/lib/amazon-verify";
 import {
   SerpApiError,
   buildAmazonSearchQuery,
@@ -80,27 +77,22 @@ export async function GET(request: Request) {
     });
   }
 
-  // Verify what SerpAPI returned.
-  const [asinVerdict, imageVerdict] = await Promise.all([
-    verifyAsinExists(serpResult.asin),
-    serpResult.imageUrl
-      ? verifyImageUrl(serpResult.imageUrl)
-      : Promise.resolve({ ok: true as const }),
-  ]);
+  // Mirror the real pipeline: the ASIN is trusted as-is (it came from
+  // a live Amazon search); only the image URL gets verified.
+  const imageVerdict = serpResult.imageUrl
+    ? await verifyImageUrl(serpResult.imageUrl)
+    : { ok: true as const };
 
   return Response.json({
     query: searchQuery,
     durationMs: Date.now() - start,
     diagnosis: {
-      verdict: !asinVerdict.ok
-        ? `SerpAPI returned ASIN ${serpResult.asin} but it failed amazon.com verification (${"reason" in asinVerdict ? asinVerdict.reason : "?"}). Product may be delisted.`
-        : !imageVerdict.ok
-          ? `ASIN verified OK, but the image URL didn't (${"reason" in imageVerdict ? imageVerdict.reason : "?"}). Image will be cleared, ASIN saved.`
-          : `Healthy: SerpAPI found ASIN ${serpResult.asin} (${serpResult.sponsored ? "sponsored" : "organic"}) and it verifies on amazon.com.`,
+      verdict: !imageVerdict.ok
+        ? `SerpAPI found ASIN ${serpResult.asin}, but the image URL failed verification (${"reason" in imageVerdict ? imageVerdict.reason : "?"}). Image would be cleared, ASIN saved.`
+        : `Healthy: SerpAPI found ASIN ${serpResult.asin} (${serpResult.sponsored ? "sponsored" : "organic"})${serpResult.imageUrl ? " with a working image" : ", no image in the result"}.`,
     },
     serpResult,
     verification: {
-      asin: asinVerdict,
       image: imageVerdict,
     },
   });
