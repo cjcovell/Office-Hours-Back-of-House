@@ -151,6 +151,58 @@ export function AdminBulkBackfill() {
     return { succeeded, failed, cancelled: cancelledRef.current };
   }
 
+  /**
+   * Drive a single item's processor with sane retry accounting.
+   *
+   * The previous inline loop conflated two very different "retry"
+   * reasons under one 3-strike budget: waiting out a rate limit (not a
+   * failure — the item is fine, we just need to wait) and a genuine
+   * transient error. A backfill that briefly tripped the 30/min limit
+   * could burn an item's whole budget on rate-limit waits and mark it
+   * `failed`, even though it would have succeeded moments later. That's
+   * exactly the "missed this run, fine on the next run" inconsistency.
+   *
+   * Now rate-limit waits don't count against the error budget; only
+   * real errors do (up to MAX_WORK_ATTEMPTS, with backoff). A generous
+   * overall cap prevents a pathological loop.
+   */
+  async function withRetries(
+    attempt: () => Promise<
+      | { kind: "done"; status: ItemStatus }
+      | { kind: "error"; error: string }
+      | { kind: "rate-limited"; retryAfterSeconds?: number }
+    >
+  ): Promise<ItemStatus> {
+    const MAX_WORK_ATTEMPTS = 3;
+    const MAX_TOTAL_ITERATIONS = 25; // safety net (errors + rate-limit waits)
+    let workAttempts = 0;
+    let lastError = "Too many retries";
+
+    for (let i = 0; i < MAX_TOTAL_ITERATIONS; i++) {
+      if (cancelledRef.current) return { state: "failed", error: "cancelled" };
+
+      const res = await attempt();
+      if (res.kind === "done") return res.status;
+
+      if (res.kind === "rate-limited") {
+        // Not a failure — wait for the window to reset and retry without
+        // spending the error budget.
+        await sleep((res.retryAfterSeconds ?? 2) * 1000 + 250);
+        continue;
+      }
+
+      // res.kind === "error"
+      lastError = res.error;
+      workAttempts++;
+      if (workAttempts >= MAX_WORK_ATTEMPTS) {
+        return { state: "failed", error: res.error };
+      }
+      await sleep(1500 * workAttempts); // linear backoff between real retries
+    }
+
+    return { state: "failed", error: lastError };
+  }
+
   async function startVerify() {
     if (withAsin.length === 0) return;
     pausedRef.current = false;
@@ -160,33 +212,29 @@ export function AdminBulkBackfill() {
 
     const result = await processQueue(
       withAsin.map((i) => i.id),
-      async (id) => {
-        // Retry loop for rate-limit responses.
-        for (let attempt = 1; attempt <= 3; attempt++) {
+      async (id) =>
+        withRetries(async () => {
           const res = await verifyGearAsinAction(id);
           if ("rateLimited" in res && res.rateLimited) {
-            await sleep((res.retryAfterSeconds ?? 2) * 1000 + 250);
-            continue;
+            return { kind: "rate-limited", retryAfterSeconds: res.retryAfterSeconds };
           }
           if ("error" in res && res.error) {
-            if (attempt < 2) {
-              await sleep(1500);
-              continue;
-            }
-            return { state: "failed", error: res.error };
+            return { kind: "error", error: res.error };
           }
           if ("ok" in res && res.ok) {
             if (res.valid === false) {
               return {
-                state: "done",
-                detail: `cleared (${res.reason ?? "invalid"})`,
+                kind: "done",
+                status: {
+                  state: "done",
+                  detail: `cleared (${res.reason ?? "invalid"})`,
+                },
               };
             }
-            return { state: "skipped", detail: "valid" };
+            return { kind: "done", status: { state: "skipped", detail: "valid" } };
           }
-        }
-        return { state: "failed", error: "Too many retries" };
-      }
+          return { kind: "error", error: "Unexpected response" };
+        })
     );
 
     setPhase(result.cancelled ? "idle" : "done");
@@ -215,32 +263,29 @@ export function AdminBulkBackfill() {
 
     const result = await processQueue(
       missing.map((i) => i.id),
-      async (id) => {
-        for (let attempt = 1; attempt <= 3; attempt++) {
+      async (id) =>
+        withRetries(async () => {
           const res = await lookupGearAmazonAction(id);
           if ("rateLimited" in res && res.rateLimited) {
-            await sleep((res.retryAfterSeconds ?? 2) * 1000 + 250);
-            continue;
+            return { kind: "rate-limited", retryAfterSeconds: res.retryAfterSeconds };
           }
           if ("error" in res && res.error) {
-            if (attempt < 2) {
-              await sleep(1500);
-              continue;
-            }
-            return { state: "failed", error: res.error };
+            return { kind: "error", error: res.error };
           }
           if ("ok" in res && res.ok) {
             const parts: string[] = [];
             if (res.foundAsin) parts.push("ASIN");
             if (res.foundImage) parts.push("image");
             if (parts.length === 0) {
-              return { state: "skipped", detail: "no match" };
+              return { kind: "done", status: { state: "skipped", detail: "no match" } };
             }
-            return { state: "done", detail: `found ${parts.join(" + ")}` };
+            return {
+              kind: "done",
+              status: { state: "done", detail: `found ${parts.join(" + ")}` },
+            };
           }
-        }
-        return { state: "failed", error: "Too many retries" };
-      }
+          return { kind: "error", error: "Unexpected response" };
+        })
     );
 
     setPhase(result.cancelled ? "idle" : "done");

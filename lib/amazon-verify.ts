@@ -79,6 +79,13 @@ export async function verifyAsinViaSerpApi(
  * to nonexistent asset IDs. These return 404, but the browser just
  * shows a broken-image placeholder — the user sees blue question marks
  * everywhere. Verifying before save prevents that.
+ *
+ * Transient failures (timeout, network error, 5xx, 429) are retried a
+ * couple of times before giving up. Without this, a single slow CDN
+ * response would discard a perfectly good image URL — that was a real
+ * source of backfill inconsistency, where an item got no image on one
+ * run but picked one up on the next. Hard failures (404, wrong
+ * content-type, too small) are conclusive and returned immediately.
  */
 export async function verifyImageUrl(url: string): Promise<AsinVerification> {
   try {
@@ -93,6 +100,33 @@ export async function verifyImageUrl(url: string): Promise<AsinVerification> {
     return { ok: false, reason: "malformed URL" };
   }
 
+  const MAX_ATTEMPTS = 3;
+  let lastTransient: AsinVerification = {
+    ok: false,
+    reason: "image verification failed",
+  };
+
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+    const [verdict, transient] = await headCheckImage(url);
+    if (!transient) return verdict; // conclusive — pass or hard fail
+    lastTransient = verdict;
+    if (attempt < MAX_ATTEMPTS) {
+      // Brief backoff so a momentary CDN hiccup gets a fresh shot.
+      await sleep(400 * attempt);
+    }
+  }
+
+  return lastTransient;
+}
+
+/**
+ * Single HEAD check. Returns the verdict plus a `transient` flag telling
+ * the caller whether the failure is worth retrying (timeout / network /
+ * 5xx / 429) versus conclusive (404, wrong content-type, etc.).
+ */
+async function headCheckImage(
+  url: string
+): Promise<[AsinVerification, boolean]> {
   try {
     const res = await fetch(url, {
       method: "HEAD",
@@ -102,31 +136,43 @@ export async function verifyImageUrl(url: string): Promise<AsinVerification> {
     });
 
     if (!res.ok) {
-      return { ok: false, reason: `HTTP ${res.status}` };
+      const transient = res.status >= 500 || res.status === 429;
+      return [{ ok: false, reason: `HTTP ${res.status}` }, transient];
     }
 
     const contentType = res.headers.get("content-type") ?? "";
     if (!contentType.toLowerCase().startsWith("image/")) {
-      return { ok: false, reason: `content-type: ${contentType || "none"}` };
+      return [
+        { ok: false, reason: `content-type: ${contentType || "none"}` },
+        false,
+      ];
     }
 
     // Tiny responses are almost always transparent pixels or broken-image
     // placeholders. Real product images are >10KB.
     const contentLength = Number(res.headers.get("content-length") ?? "0");
     if (contentLength > 0 && contentLength < 1024) {
-      return { ok: false, reason: `too small (${contentLength} bytes)` };
+      return [
+        { ok: false, reason: `too small (${contentLength} bytes)` },
+        false,
+      ];
     }
 
-    return { ok: true };
+    return [{ ok: true }, false];
   } catch (err) {
+    // Network-level errors (timeout, DNS, connection reset) are transient.
     const reason =
       err instanceof Error
         ? err.name === "TimeoutError"
           ? "image verification timed out"
           : err.message
         : "unknown error";
-    return { ok: false, reason };
+    return [{ ok: false, reason }, true];
   }
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((r) => setTimeout(r, ms));
 }
 
 /**
