@@ -73,9 +73,16 @@ export class SerpApiError extends Error {
  * comes from a live search — but stale/delisted products can linger
  * in results, which the admin review step and the bulk
  * verifyAsinViaSerpApi action catch.
+ *
+ * `opts.preferAsin` — when the caller is searching for a *known* ASIN
+ * (e.g. an admin-entered one), pass it here. The exact match is then
+ * chosen from anywhere in the results rather than just the top organic
+ * hit, since Amazon's keyword ranking for a raw ASIN doesn't reliably
+ * put the exact product first.
  */
 export async function searchAmazonViaSerpApi(
-  query: string
+  query: string,
+  opts: { preferAsin?: string } = {}
 ): Promise<AmazonSearchResult | null> {
   const apiKey = process.env.SERPAPI_API_KEY;
   if (!apiKey) {
@@ -139,8 +146,15 @@ export async function searchAmazonViaSerpApi(
       typeof r.asin === "string" && asinShape.test(r.asin)
   );
 
+  // When hunting for a specific ASIN, take the exact match from anywhere
+  // in the results before falling back to ranking heuristics.
+  const preferred = opts.preferAsin
+    ? withAsin.find(
+        (r) => r.asin.toUpperCase() === opts.preferAsin!.toUpperCase()
+      )
+    : undefined;
   const organic = withAsin.find((r) => !r.sponsored);
-  const chosen = organic ?? withAsin[0];
+  const chosen = preferred ?? organic ?? withAsin[0];
   if (!chosen) return null;
 
   return {
