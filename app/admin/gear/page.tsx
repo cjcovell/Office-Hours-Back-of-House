@@ -49,19 +49,11 @@ export default async function AdminGearListPage({
 
   // Duplicate-ASIN scan runs across the WHOLE catalog, independent of the
   // status/category filters above — a duplicate is a duplicate regardless
-  // of what the admin is currently looking at.
-  const { data: asinRows } = await client
-    .from("gear_items")
-    .select("id, brand, name, model, asin")
-    .not("asin", "is", null);
+  // of what the admin is currently looking at. Paginate so the scan
+  // stays correct past PostgREST's max_rows cap (1000): a missed duplicate
+  // pair would otherwise show the banner as falsely "clean".
   const duplicateGroups = findDuplicateAsinGroups(
-    (asinRows ?? []) as unknown as {
-      id: string;
-      brand: string;
-      name: string;
-      model: string;
-      asin: string | null;
-    }[]
+    await fetchAllAsinRows(client)
   );
 
   const categories = Array.from(
@@ -234,4 +226,38 @@ function buildHref(status: StatusFilter, category: string | undefined) {
   if (category) params.set("category", category);
   const qs = params.toString();
   return qs ? `/admin/gear?${qs}` : "/admin/gear";
+}
+
+type AsinScanRow = {
+  id: string;
+  brand: string;
+  name: string;
+  model: string;
+  asin: string | null;
+};
+
+/**
+ * Fetch every gear row that has an ASIN, paging past PostgREST's
+ * max_rows cap (1000) so the duplicate scan sees the whole catalog. On a
+ * read error we return what we have so far — the banner is advisory and
+ * the main list surfaces hard failures separately.
+ */
+async function fetchAllAsinRows(
+  client: ReturnType<typeof createSupabaseAdminClient>
+): Promise<AsinScanRow[]> {
+  const pageSize = 1000;
+  const all: AsinScanRow[] = [];
+  for (let from = 0; ; from += pageSize) {
+    const { data, error } = await client
+      .from("gear_items")
+      .select("id, brand, name, model, asin")
+      .not("asin", "is", null)
+      .order("id", { ascending: true })
+      .range(from, from + pageSize - 1);
+    if (error) break;
+    const batch = (data ?? []) as unknown as AsinScanRow[];
+    all.push(...batch);
+    if (batch.length < pageSize) break;
+  }
+  return all;
 }

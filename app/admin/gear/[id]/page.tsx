@@ -27,11 +27,15 @@ export default async function AdminGearEditPage({
   // Flag other catalog items sharing this ASIN — same ASIN means the same
   // Amazon product, i.e. a likely accidental duplicate.
   const gearAsin = (gear as GearItemRow).asin;
+  // Case-insensitive match (ilike, no wildcards) to mirror the
+  // catalog-wide scan, which dedupes on upper(asin). ASINs are stored
+  // uppercase today, but matching the scan's semantics keeps the two
+  // duplicate surfaces from ever disagreeing.
   const { data: asinTwins } = gearAsin
     ? await client
         .from("gear_items")
         .select("id, brand, name, model")
-        .eq("asin", gearAsin)
+        .ilike("asin", gearAsin)
         .neq("id", id)
     : { data: [] };
   const duplicates = (asinTwins ?? []) as Pick<
@@ -107,6 +111,11 @@ export default async function AdminGearEditPage({
               <Link key={d.id} href={`/admin/gear/${d.id}`}>
                 <Badge variant="outline" className="hover:bg-accent">
                   {d.brand} {d.name}
+                  {d.model ? (
+                    <span className="ml-1 font-normal text-muted-foreground">
+                      {d.model}
+                    </span>
+                  ) : null}
                 </Badge>
               </Link>
             ))}
