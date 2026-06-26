@@ -1,14 +1,9 @@
-import Link from "next/link";
 import { notFound } from "next/navigation";
 import { ExternalLink } from "lucide-react";
 
-import { Badge } from "@/components/ui/badge";
-import { Card, CardContent } from "@/components/ui/card";
 import { Separator } from "@/components/ui/separator";
-import { AmazonLink } from "@/components/amazon-link";
-import { GearThumbnail } from "@/components/gear-thumbnail";
+import { KitGrid } from "@/components/kit-grid";
 import { RoleBadgeGroup } from "@/components/role-badge";
-import { formatCategory } from "@/lib/categories";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 import type {
   ContributorRow,
@@ -52,7 +47,6 @@ export default async function ContributorPage({
   const sortedKit = [...contributor.kit_entries].sort(
     (a, b) => a.display_order - b.display_order
   );
-  const grouped = groupByCategory(sortedKit);
 
   return (
     <article className="space-y-10">
@@ -92,84 +86,11 @@ export default async function ContributorPage({
             No gear added yet.
           </p>
         ) : (
-          <div className="space-y-10">
-            {grouped.map(({ category, entries }) => (
-              <div key={category} className="space-y-3">
-                <h3 className="text-sm font-semibold uppercase tracking-wide text-muted-foreground">
-                  {formatCategory(category)}
-                </h3>
-                <div className="grid gap-3">
-                  {entries.map((entry) => (
-                    <KitRow key={entry.id} entry={entry} />
-                  ))}
-                </div>
-              </div>
-            ))}
-          </div>
+          <KitGrid entries={sortedKit} />
         )}
       </section>
     </article>
   );
-}
-
-function KitRow({
-  entry,
-}: {
-  entry: KitEntryRow & { gear_items: GearItemRow };
-}) {
-  const gear = entry.gear_items;
-  return (
-    <Card>
-      <CardContent className="flex flex-col gap-3 p-4 sm:flex-row sm:items-center sm:justify-between">
-        <div className="flex min-w-0 items-start gap-3">
-          <GearThumbnail gear={gear} />
-          <div className="min-w-0">
-            <div className="flex items-baseline gap-2">
-              <span className="text-xs uppercase tracking-wide text-muted-foreground">
-                {gear.brand}
-              </span>
-              {gear.status === "pending" ? (
-                <Badge variant="muted">Pending</Badge>
-              ) : null}
-            </div>
-            <Link
-              href={`/gear/${gear.id}`}
-              className="font-semibold hover:underline"
-            >
-              {gear.name}
-            </Link>
-            <div className="text-xs text-muted-foreground">{gear.model}</div>
-            {entry.notes ? (
-              <p className="mt-2 max-w-prose text-sm text-foreground/90">
-                &ldquo;{entry.notes}&rdquo;
-              </p>
-            ) : null}
-          </div>
-        </div>
-        <div className="shrink-0">
-          <AmazonLink asin={gear.asin} />
-        </div>
-      </CardContent>
-    </Card>
-  );
-}
-
-function groupByCategory(
-  entries: Array<KitEntryRow & { gear_items: GearItemRow }>
-) {
-  const map = new Map<
-    string,
-    Array<KitEntryRow & { gear_items: GearItemRow }>
-  >();
-  for (const entry of entries) {
-    const cat = entry.category_override ?? entry.gear_items.category;
-    const list = map.get(cat) ?? [];
-    list.push(entry);
-    map.set(cat, list);
-  }
-  return Array.from(map.entries())
-    .sort(([a], [b]) => a.localeCompare(b))
-    .map(([category, entries]) => ({ category, entries }));
 }
 
 function Avatar({
