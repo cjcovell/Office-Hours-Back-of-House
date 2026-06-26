@@ -6,6 +6,7 @@ import { Badge } from "@/components/ui/badge";
 import { Card, CardContent } from "@/components/ui/card";
 import { Separator } from "@/components/ui/separator";
 import { AmazonLink } from "@/components/amazon-link";
+import { GearThumbnail } from "@/components/gear-thumbnail";
 import { RoleBadgeGroup } from "@/components/role-badge";
 import { formatCategory } from "@/lib/categories";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
@@ -120,27 +121,30 @@ function KitRow({
   return (
     <Card>
       <CardContent className="flex flex-col gap-3 p-4 sm:flex-row sm:items-center sm:justify-between">
-        <div className="min-w-0">
-          <div className="flex items-baseline gap-2">
-            <span className="text-xs uppercase tracking-wide text-muted-foreground">
-              {gear.brand}
-            </span>
-            {gear.status === "pending" ? (
-              <Badge variant="muted">Pending</Badge>
+        <div className="flex min-w-0 items-start gap-3">
+          <GearThumbnail gear={gear} />
+          <div className="min-w-0">
+            <div className="flex items-baseline gap-2">
+              <span className="text-xs uppercase tracking-wide text-muted-foreground">
+                {gear.brand}
+              </span>
+              {gear.status === "pending" ? (
+                <Badge variant="muted">Pending</Badge>
+              ) : null}
+            </div>
+            <Link
+              href={`/gear/${gear.id}`}
+              className="font-semibold hover:underline"
+            >
+              {gear.name}
+            </Link>
+            <div className="text-xs text-muted-foreground">{gear.model}</div>
+            {entry.notes ? (
+              <p className="mt-2 max-w-prose text-sm text-foreground/90">
+                &ldquo;{entry.notes}&rdquo;
+              </p>
             ) : null}
           </div>
-          <Link
-            href={`/gear/${gear.id}`}
-            className="font-semibold hover:underline"
-          >
-            {gear.name}
-          </Link>
-          <div className="text-xs text-muted-foreground">{gear.model}</div>
-          {entry.notes ? (
-            <p className="mt-2 max-w-prose text-sm text-foreground/90">
-              &ldquo;{entry.notes}&rdquo;
-            </p>
-          ) : null}
         </div>
         <div className="shrink-0">
           <AmazonLink asin={gear.asin} />

@@ -1,5 +1,6 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
+import { AlertTriangle } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
 import { AdminGearEditor } from "@/components/admin-gear-editor";
@@ -22,6 +23,21 @@ export default async function AdminGearEditPage({
     .eq("id", id)
     .maybeSingle();
   if (!gear) notFound();
+
+  // Flag other catalog items sharing this ASIN — same ASIN means the same
+  // Amazon product, i.e. a likely accidental duplicate.
+  const gearAsin = (gear as GearItemRow).asin;
+  const { data: asinTwins } = gearAsin
+    ? await client
+        .from("gear_items")
+        .select("id, brand, name, model")
+        .eq("asin", gearAsin)
+        .neq("id", id)
+    : { data: [] };
+  const duplicates = (asinTwins ?? []) as Pick<
+    GearItemRow,
+    "id" | "brand" | "name" | "model"
+  >[];
 
   // Show which kits reference this item so the admin knows the blast radius.
   const { data: kits } = await client
@@ -73,6 +89,30 @@ export default async function AdminGearEditPage({
           </div>
         ) : null}
       </header>
+
+      {duplicates.length > 0 ? (
+        <div className="rounded-md border border-amber-500/30 bg-amber-50/40 p-3 text-sm dark:bg-amber-500/5">
+          <div className="flex items-center gap-2 font-medium text-amber-900 dark:text-amber-200">
+            <AlertTriangle className="size-4" />
+            Duplicate ASIN — also used by{" "}
+            {duplicates.length} other{" "}
+            {duplicates.length === 1 ? "item" : "items"}
+          </div>
+          <p className="mt-1 text-xs text-muted-foreground">
+            ASIN <span className="font-mono">{gearAsin}</span> points at the
+            same Amazon product as:
+          </p>
+          <ul className="mt-2 flex flex-wrap gap-1">
+            {duplicates.map((d) => (
+              <Link key={d.id} href={`/admin/gear/${d.id}`}>
+                <Badge variant="outline" className="hover:bg-accent">
+                  {d.brand} {d.name}
+                </Badge>
+              </Link>
+            ))}
+          </ul>
+        </div>
+      ) : null}
 
       <AdminGearEditor gear={gear as GearItemRow} />
     </div>

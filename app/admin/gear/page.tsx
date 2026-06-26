@@ -1,6 +1,10 @@
 import Link from "next/link";
 
 import { AdminBulkBackfill } from "@/components/admin-bulk-backfill";
+import {
+  DuplicateAsinScan,
+  findDuplicateAsinGroups,
+} from "@/components/admin-duplicate-asins";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent } from "@/components/ui/card";
 import { GEAR_CATEGORIES, formatCategory } from "@/lib/categories";
@@ -43,6 +47,23 @@ export default async function AdminGearListPage({
   type Row = GearItemRow & { kit_entries: { count: number }[] };
   const rows = (data ?? []) as unknown as Row[];
 
+  // Duplicate-ASIN scan runs across the WHOLE catalog, independent of the
+  // status/category filters above — a duplicate is a duplicate regardless
+  // of what the admin is currently looking at.
+  const { data: asinRows } = await client
+    .from("gear_items")
+    .select("id, brand, name, model, asin")
+    .not("asin", "is", null);
+  const duplicateGroups = findDuplicateAsinGroups(
+    (asinRows ?? []) as unknown as {
+      id: string;
+      brand: string;
+      name: string;
+      model: string;
+      asin: string | null;
+    }[]
+  );
+
   const categories = Array.from(
     new Set<string>([...GEAR_CATEGORIES, ...rows.map((g) => g.category)])
   ).sort();
@@ -58,6 +79,8 @@ export default async function AdminGearListPage({
       </header>
 
       <AdminBulkBackfill />
+
+      <DuplicateAsinScan groups={duplicateGroups} />
 
       <div className="space-y-3">
         <div>
