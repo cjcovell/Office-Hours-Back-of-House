@@ -286,6 +286,159 @@ export async function enrichGearFromQuery(
   };
 }
 
+// ---------- ASIN-locked re-enrichment (admin "reload from ASIN") -----------
+
+const DESCRIPTION_SYSTEM_PROMPT = `You are a catalog assistant for Office Hours Global, a daily broadcast/production show. Write a single short catalog description for one piece of gear.
+
+Rules:
+- One or two sentences. Plain and factual: what it is and what it's used for in broadcast/production.
+- No marketing language ("perfect for", "unleash your creativity").
+- Do NOT invent specs you're unsure about.`;
+
+const gearDescriptionSchema = z.object({
+  description: z.string().min(1).max(400),
+});
+
+/**
+ * Look up a product by a *known* ASIN (rather than a fuzzy brand/model
+ * search). Used by the admin "reload from ASIN" flow: the admin has
+ * already entered the exact ASIN, so we search for that ASIN and only
+ * accept the result if it actually resolves to the same ASIN. This is
+ * more precise than lookupAmazonDetails, which name-searches and can
+ * return a different (wrong) product.
+ *
+ * `matched` is false when SerpAPI returns nothing for the ASIN, or
+ * returns a different ASIN — in that case the image is left null so the
+ * caller doesn't overwrite a good image with the wrong product's photo.
+ */
+export async function lookupAmazonByAsin(
+  asin: string,
+  opts?: { userId?: string | null }
+): Promise<{
+  asin: string;
+  imageUrl: string | null;
+  title: string | null;
+  matched: boolean;
+}> {
+  const normalized = asin.trim().toUpperCase();
+  if (!/^[A-Z0-9]{10}$/.test(normalized)) {
+    throw new Error("Invalid ASIN");
+  }
+
+  const start = Date.now();
+  let serp;
+  try {
+    serp = await searchAmazonViaSerpApi(normalized);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : "unknown";
+    console.warn(`[gear-enrich] SerpAPI error for ASIN "${normalized}": ${msg}`);
+    void logAiCall({
+      fn: "lookupAmazonByAsin",
+      query: normalized,
+      userId: opts?.userId,
+      durationMs: Date.now() - start,
+      error: msg,
+    });
+    throw err;
+  }
+
+  // No result, or the search surfaced a different product — don't trust
+  // its image for this ASIN.
+  if (!serp || serp.asin.toUpperCase() !== normalized) {
+    void logAiCall({
+      fn: "lookupAmazonByAsin",
+      query: normalized,
+      userId: opts?.userId,
+      durationMs: Date.now() - start,
+      aiReturnedAsin: serp?.asin ?? null,
+      aiReturnedImage: serp?.imageUrl ?? null,
+      finalAsin: serp?.asin ?? null,
+      finalImage: null,
+    });
+    return {
+      asin: normalized,
+      imageUrl: null,
+      title: serp?.title ?? null,
+      matched: false,
+    };
+  }
+
+  const [finalImage, imageVerdict] = await verifyImageWithDiagnostics(
+    serp.imageUrl,
+    normalized
+  );
+
+  void logAiCall({
+    fn: "lookupAmazonByAsin",
+    query: normalized,
+    userId: opts?.userId,
+    durationMs: Date.now() - start,
+    aiReturnedAsin: serp.asin,
+    aiReturnedImage: serp.imageUrl,
+    imageVerdict,
+    finalAsin: serp.asin,
+    finalImage,
+  });
+
+  return {
+    asin: normalized,
+    imageUrl: finalImage,
+    title: serp.title || null,
+    matched: true,
+  };
+}
+
+/**
+ * Regenerate just the catalog description with the AI text model, given
+ * the canonical brand/name/model (and optionally the Amazon listing
+ * title for extra grounding). Returns the description string only —
+ * other fields are left to the admin.
+ */
+export async function generateGearDescription(
+  params: { brand: string; name: string; model: string; amazonTitle?: string | null },
+  opts?: { userId?: string | null }
+): Promise<string> {
+  const context = [
+    `Brand: ${params.brand}`,
+    `Name: ${params.name}`,
+    `Model: ${params.model}`,
+    params.amazonTitle ? `Amazon listing title: ${params.amazonTitle}` : null,
+  ]
+    .filter(Boolean)
+    .join("\n");
+
+  const start = Date.now();
+  let description: string;
+  try {
+    const result = await generateText({
+      model: gateway(TEXT_MODEL_ID),
+      system: DESCRIPTION_SYSTEM_PROMPT,
+      prompt: `Write the catalog description for this gear:\n${context}`,
+      experimental_output: Output.object({ schema: gearDescriptionSchema }),
+    });
+    description = (result.experimental_output as { description: string }).description;
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : "unknown";
+    void logAiCall({
+      fn: "generateGearDescription",
+      query: context,
+      userId: opts?.userId,
+      durationMs: Date.now() - start,
+      error: msg,
+    });
+    throw err;
+  }
+
+  void logAiCall({
+    fn: "generateGearDescription",
+    query: context,
+    userId: opts?.userId,
+    durationMs: Date.now() - start,
+  });
+
+  return description;
+}
+
 // ---------- Verification ----------------------------------------------------
 
 /**
@@ -338,7 +491,12 @@ async function logAiCall(params: {
       user_id: params.userId ?? null,
       fn: params.fn,
       query: params.query,
-      model_id: params.fn === "enrichGearFromQuery" ? TEXT_MODEL_ID : "serpapi",
+      // Text-model calls log the model id; pure SerpAPI lookups log "serpapi".
+      model_id:
+        params.fn === "enrichGearFromQuery" ||
+        params.fn === "generateGearDescription"
+          ? TEXT_MODEL_ID
+          : "serpapi",
       duration_ms: params.durationMs ?? null,
       step_count: null,
       web_search_calls: null,

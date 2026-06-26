@@ -21,6 +21,7 @@ import { AmazonLink } from "@/components/amazon-link";
 import {
   deleteGearAction,
   lookupGearAmazonAction,
+  reloadGearFromAsinAction,
   updateGearAction,
 } from "@/app/admin/gear/actions";
 import { buildAmazonUrl } from "@/lib/amazon";
@@ -44,6 +45,7 @@ export function AdminGearEditor({ gear }: { gear: GearItemRow }) {
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [isPending, startTransition] = useTransition();
   const [isReFetching, startReFetch] = useTransition();
+  const [isReloadingAsin, startReloadAsin] = useTransition();
 
   function handleSave(e: React.FormEvent) {
     e.preventDefault();
@@ -110,6 +112,45 @@ export function AdminGearEditor({ gear }: { gear: GearItemRow }) {
     });
   }
 
+  /**
+   * Reload the image + AI description for the *exact* ASIN currently in
+   * the form. Unlike "Re-fetch from Amazon" (a name search), this locks
+   * onto the ASIN the admin typed. Non-destructive: it fills the form
+   * fields for review; the admin still has to Save.
+   */
+  function handleReloadFromAsin() {
+    setError(null);
+    setSuccess(false);
+    startReloadAsin(async () => {
+      const res = await reloadGearFromAsinAction(gear.id, form.asin);
+      if ("rateLimited" in res && res.rateLimited) {
+        setError(`Rate limited — try again in ${res.retryAfterSeconds}s`);
+        return;
+      }
+      if ("error" in res && res.error) {
+        setError(res.error);
+        return;
+      }
+      if ("ok" in res && res.ok) {
+        setForm((cur) => ({
+          ...cur,
+          description: res.description,
+          // Only swap the image when we positively matched the ASIN —
+          // otherwise keep whatever's there rather than blank it out.
+          image_url: res.foundImage ? res.imageUrl ?? "" : cur.image_url,
+        }));
+        if (!res.matched) {
+          setError(
+            `Couldn't find ASIN ${res.asin} on Amazon — description refreshed, image left unchanged. Double-check the ASIN.`
+          );
+        } else {
+          setSuccess(true);
+        }
+      }
+    });
+  }
+
+  const asinReady = /^[A-Z0-9]{10}$/.test(form.asin);
   const previewUrl = form.asin.length === 10 ? buildAmazonUrl(form.asin) : null;
 
   return (
@@ -222,7 +263,7 @@ export function AdminGearEditor({ gear }: { gear: GearItemRow }) {
               size="sm"
               variant="outline"
               onClick={handleReFetch}
-              disabled={isReFetching || isPending}
+              disabled={isReFetching || isReloadingAsin || isPending}
             >
               <RefreshCw
                 className={isReFetching ? "size-3.5 animate-spin" : "size-3.5"}
@@ -243,6 +284,29 @@ export function AdminGearEditor({ gear }: { gear: GearItemRow }) {
                 maxLength={10}
                 className="font-mono"
               />
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                onClick={handleReloadFromAsin}
+                disabled={
+                  !asinReady || isReloadingAsin || isReFetching || isPending
+                }
+                className="w-full"
+              >
+                <RefreshCw
+                  className={
+                    isReloadingAsin ? "size-3.5 animate-spin" : "size-3.5"
+                  }
+                />
+                {isReloadingAsin
+                  ? "Reloading…"
+                  : "Reload image + description from this ASIN"}
+              </Button>
+              <p className="text-xs text-muted-foreground">
+                Pulls the product image for this exact ASIN and rewrites the
+                AI description. Review, then Save.
+              </p>
             </div>
             <div className="space-y-2">
               <Label htmlFor="status">Status</Label>
