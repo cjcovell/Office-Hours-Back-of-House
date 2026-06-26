@@ -39,7 +39,17 @@ function truncate(s: string, len: number): string {
 const FN_LABELS: Record<string, string> = {
   enrichGearFromQuery: "Text + Amazon",
   lookupAmazonDetails: "Amazon lookup",
+  lookupAmazonByAsin: "ASIN lookup",
+  generateGearDescription: "AI description",
 };
+
+// Functions offered as filter chips (label comes from FN_LABELS).
+const FN_FILTERS = [
+  "enrichGearFromQuery",
+  "lookupAmazonDetails",
+  "lookupAmazonByAsin",
+  "generateGearDescription",
+] as const;
 
 function fnLabel(fn: string): string {
   return FN_LABELS[fn] ?? fn;
@@ -49,17 +59,31 @@ function fnLabel(fn: string): string {
 // Page
 // ─────────────────────────────────────────────
 
-export default async function AdminAiLogsPage() {
+export default async function AdminAiLogsPage({
+  searchParams,
+}: {
+  searchParams: Promise<{ fn?: string; errors?: string }>;
+}) {
   // Extra safety check (layout already guards but belt + suspenders).
   const me = await getCurrentAppUser();
   if (!me || me.appUser.role !== "admin") redirect("/login?next=/admin/ai-logs");
 
+  const { fn, errors } = await searchParams;
+  const fnFilter = (FN_FILTERS as readonly string[]).includes(fn ?? "")
+    ? (fn as string)
+    : null;
+  const errorsOnly = errors === "1";
+
   const client = createSupabaseAdminClient();
-  const { data: rows, error } = await client
+  let logsQuery = client
     .from("ai_call_logs")
     .select("*")
     .order("created_at", { ascending: false })
     .limit(200);
+  if (fnFilter) logsQuery = logsQuery.eq("fn", fnFilter);
+  if (errorsOnly) logsQuery = logsQuery.not("error", "is", null);
+
+  const { data: rows, error } = await logsQuery;
 
   if (error) {
     return (
@@ -99,6 +123,27 @@ export default async function AdminAiLogsPage() {
         </p>
       </header>
 
+      <div className="flex flex-wrap gap-2">
+        <FilterChip
+          active={!fnFilter && !errorsOnly}
+          label="All"
+          href={buildLogsHref(null, false)}
+        />
+        {FN_FILTERS.map((f) => (
+          <FilterChip
+            key={f}
+            active={fnFilter === f}
+            label={fnLabel(f)}
+            href={buildLogsHref(f, errorsOnly)}
+          />
+        ))}
+        <FilterChip
+          active={errorsOnly}
+          label="Errors only"
+          href={buildLogsHref(fnFilter, !errorsOnly)}
+        />
+      </div>
+
       {/* Stats bar */}
       <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
         <StatCard label="Total calls" value={String(total)} />
@@ -117,7 +162,9 @@ export default async function AdminAiLogsPage() {
       {logs.length === 0 ? (
         <Card>
           <CardContent className="p-6 text-sm text-muted-foreground">
-            No AI call logs yet.
+            {fnFilter || errorsOnly
+              ? "No logs match this filter."
+              : "No AI call logs yet."}
           </CardContent>
         </Card>
       ) : (
@@ -160,6 +207,37 @@ export default async function AdminAiLogsPage() {
 // ─────────────────────────────────────────────
 // Sub-components
 // ─────────────────────────────────────────────
+
+function buildLogsHref(fn: string | null, errorsOnly: boolean): string {
+  const p = new URLSearchParams();
+  if (fn) p.set("fn", fn);
+  if (errorsOnly) p.set("errors", "1");
+  const qs = p.toString();
+  return qs ? `/admin/ai-logs?${qs}` : "/admin/ai-logs";
+}
+
+function FilterChip({
+  active,
+  label,
+  href,
+}: {
+  active: boolean;
+  label: string;
+  href: string;
+}) {
+  return (
+    <Link
+      href={href}
+      className={`rounded-full border px-3 py-1 text-xs font-medium transition-colors ${
+        active
+          ? "border-foreground bg-foreground text-background"
+          : "border-border bg-background text-muted-foreground hover:text-foreground"
+      }`}
+    >
+      {label}
+    </Link>
+  );
+}
 
 function StatCard({
   label,

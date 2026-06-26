@@ -32,7 +32,7 @@ async function requireAdmin() {
  * app layer because we use the service-role client for the DB write.
  */
 export async function updateGearAction(formData: FormData) {
-  await requireAdmin();
+  const me = await requireAdmin();
 
   const id = String(formData.get("id") ?? "");
   const name = String(formData.get("name") ?? "").trim();
@@ -65,6 +65,34 @@ export async function updateGearAction(formData: FormData) {
   }
 
   const client = createSupabaseAdminClient();
+
+  // Auto-refresh the product image when the ASIN changes — the product is
+  // now a different one, so the old photo is likely wrong. Guard rails:
+  //  - only when the submitted image is empty or an Amazon-CDN URL, so we
+  //    never clobber an admin's manual Supabase upload;
+  //  - on any lookup miss/error, keep the submitted image (per feedback:
+  //    "if there is an error … leave the existing one alone").
+  let finalImageUrl = imageUrl;
+  if (asinRaw) {
+    const { data: existing } = await client
+      .from("gear_items")
+      .select("asin")
+      .eq("id", id)
+      .maybeSingle();
+    const asinChanged = (existing?.asin ?? null) !== asinRaw;
+    const imageIsReplaceable = !imageUrl || isAmazonImageUrl(imageUrl);
+    if (asinChanged && imageIsReplaceable) {
+      try {
+        const lookup = await lookupAmazonByAsin(asinRaw, { userId: me.authId });
+        if (lookup.matched && lookup.imageUrl) {
+          finalImageUrl = lookup.imageUrl;
+        }
+      } catch {
+        // Keep the submitted image on any lookup failure.
+      }
+    }
+  }
+
   const { error } = await client
     .from("gear_items")
     .update({
@@ -73,7 +101,7 @@ export async function updateGearAction(formData: FormData) {
       model,
       category,
       description,
-      image_url: imageUrl,
+      image_url: finalImageUrl,
       asin: asinRaw || null,
       status,
     })
@@ -290,6 +318,59 @@ export async function reloadGearFromAsinAction(
     matched: true as const,
     foundImage: !!image.imageUrl,
     description,
+  };
+}
+
+/**
+ * Reload ONLY the product image for a specific ASIN (no description
+ * change). Backs the editor's "Reload image from ASIN" button.
+ *
+ * Non-destructive: returns the image for the editor to apply; nothing is
+ * written here. On a miss/error the lookup returns matched:false with a
+ * null image, so the caller keeps the existing image untouched.
+ */
+export async function reloadGearImageFromAsinAction(
+  gearId: string,
+  asinInput: string
+) {
+  const me = await getCurrentAppUser();
+  if (!me || me.appUser.role !== "admin") {
+    return { error: "Forbidden" as const };
+  }
+  if (!gearId) return { error: "Missing gearId" as const };
+
+  const asin = asinInput.trim().toUpperCase();
+  if (!/^[A-Z0-9]{10}$/.test(asin)) {
+    return { error: "Enter a valid 10-character ASIN first." as const };
+  }
+
+  const rl = rateLimit(me.authId, "ai-gear-enrich", {
+    maxRequests: 30,
+    windowMs: 60_000,
+  });
+  if (!rl.allowed) {
+    return {
+      error: "Rate limited",
+      rateLimited: true as const,
+      retryAfterSeconds: rl.retryAfterSeconds,
+    };
+  }
+
+  let image;
+  try {
+    image = await lookupAmazonByAsin(asin, { userId: me.authId });
+  } catch (err) {
+    return {
+      error: err instanceof Error ? err.message : "Amazon lookup failed",
+    };
+  }
+
+  return {
+    ok: true as const,
+    asin,
+    imageUrl: image.imageUrl,
+    matched: image.matched,
+    foundImage: !!image.imageUrl,
   };
 }
 
