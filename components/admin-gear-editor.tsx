@@ -22,6 +22,7 @@ import {
   deleteGearAction,
   lookupGearAmazonAction,
   reloadGearFromAsinAction,
+  reloadGearImageFromAsinAction,
   updateGearAction,
 } from "@/app/admin/gear/actions";
 import { buildAmazonUrl } from "@/lib/amazon";
@@ -49,6 +50,7 @@ export function AdminGearEditor({ gear }: { gear: GearItemRow }) {
   const [isPending, startTransition] = useTransition();
   const [isReFetching, startReFetch] = useTransition();
   const [isReloadingAsin, startReloadAsin] = useTransition();
+  const [isReloadingImage, startReloadImage] = useTransition();
 
   function handleSave(e: React.FormEvent) {
     e.preventDefault();
@@ -164,6 +166,37 @@ export function AdminGearEditor({ gear }: { gear: GearItemRow }) {
     });
   }
 
+  /**
+   * Reload only the product image for the current ASIN (no description
+   * change). Non-destructive — keeps the existing image if the ASIN can't
+   * be resolved, per the "leave the existing one alone on error" rule.
+   */
+  function handleReloadImage() {
+    setError(null);
+    setSuccessMsg(null);
+    startReloadImage(async () => {
+      const res = await reloadGearImageFromAsinAction(gear.id, form.asin);
+      if ("rateLimited" in res && res.rateLimited) {
+        setError(`Rate limited — try again in ${res.retryAfterSeconds}s`);
+        return;
+      }
+      if ("error" in res && res.error) {
+        setError(res.error);
+        return;
+      }
+      if ("ok" in res && res.ok) {
+        if (res.foundImage) {
+          setForm((cur) => ({ ...cur, image_url: res.imageUrl ?? "" }));
+          setSuccessMsg("Image loaded — review and Save to keep it.");
+        } else {
+          setError(
+            `Couldn't fetch an image for ASIN ${res.asin} — existing image left unchanged.`
+          );
+        }
+      }
+    });
+  }
+
   const asinReady = /^[A-Z0-9]{10}$/.test(form.asin);
   // Gate the preview link on the same validity check as the reload button
   // so the two adjacent controls never disagree on what a usable ASIN is.
@@ -176,8 +209,28 @@ export function AdminGearEditor({ gear }: { gear: GearItemRow }) {
 
       <Card>
         <CardContent className="space-y-4 p-6">
-          <div className="flex items-center justify-between">
+          <div className="flex flex-wrap items-center justify-between gap-2">
             <h2 className="text-lg font-semibold tracking-tight">Image</h2>
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              onClick={handleReloadImage}
+              disabled={
+                !asinReady ||
+                isReloadingImage ||
+                isReloadingAsin ||
+                isReFetching ||
+                isPending
+              }
+            >
+              <RefreshCw
+                className={
+                  isReloadingImage ? "size-3.5 animate-spin" : "size-3.5"
+                }
+              />
+              {isReloadingImage ? "Loading…" : "Reload image from ASIN"}
+            </Button>
           </div>
           <ImageUploader
             bucket="gear-images"
@@ -188,6 +241,10 @@ export function AdminGearEditor({ gear }: { gear: GearItemRow }) {
             aspect="square"
             label={form.image_url ? "Replace image" : "Upload image"}
           />
+          <p className="text-xs text-muted-foreground">
+            Auto-updates from Amazon when you change the ASIN and Save.
+            Manual uploads are never overwritten.
+          </p>
         </CardContent>
       </Card>
 
@@ -279,7 +336,9 @@ export function AdminGearEditor({ gear }: { gear: GearItemRow }) {
               size="sm"
               variant="outline"
               onClick={handleReFetch}
-              disabled={isReFetching || isReloadingAsin || isPending}
+              disabled={
+                isReFetching || isReloadingAsin || isReloadingImage || isPending
+              }
             >
               <RefreshCw
                 className={isReFetching ? "size-3.5 animate-spin" : "size-3.5"}
@@ -306,7 +365,11 @@ export function AdminGearEditor({ gear }: { gear: GearItemRow }) {
                 variant="outline"
                 onClick={handleReloadFromAsin}
                 disabled={
-                  !asinReady || isReloadingAsin || isReFetching || isPending
+                  !asinReady ||
+                  isReloadingAsin ||
+                  isReloadingImage ||
+                  isReFetching ||
+                  isPending
                 }
                 className="w-full"
               >
