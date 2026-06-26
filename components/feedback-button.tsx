@@ -29,7 +29,7 @@ export function FeedbackButton() {
   const pathname = usePathname();
 
   async function handleSubmit() {
-    if (!message.trim()) return;
+    if (!message.trim() || isSubmitting) return;
 
     setIsSubmitting(true);
     try {
@@ -94,12 +94,26 @@ export function FeedbackButton() {
           <textarea
             value={message}
             onChange={(e) => setMessage(e.target.value)}
+            onKeyDown={(e) => {
+              // Cmd/Ctrl+Enter submits, matching the convention in most
+              // comment/chat composers.
+              if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
+                e.preventDefault();
+                void handleSubmit();
+              }
+            }}
             placeholder="What's on your mind?"
             rows={4}
             maxLength={5000}
             className="w-full resize-none rounded-lg border border-input bg-background px-3 py-2.5 text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring"
           />
-          <div className="flex justify-end gap-2">
+          <div className="flex items-center justify-end gap-2">
+            <span className="mr-auto hidden text-xs text-muted-foreground sm:inline">
+              <kbd className="rounded border bg-muted px-1 font-sans">⌘</kbd>/
+              <kbd className="rounded border bg-muted px-1 font-sans">Ctrl</kbd>
+              +<kbd className="rounded border bg-muted px-1 font-sans">↵</kbd> to
+              send
+            </span>
             <button
               type="button"
               onClick={() => setOpen(false)}
