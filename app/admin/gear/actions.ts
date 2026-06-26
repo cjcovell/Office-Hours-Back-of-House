@@ -251,6 +251,20 @@ export async function reloadGearFromAsinAction(
     };
   }
 
+  // If the ASIN didn't resolve to itself, change nothing: don't burn an
+  // AI call regenerating a description from an unconfirmed/empty title,
+  // and signal the caller to leave the existing fields untouched.
+  if (!image.matched) {
+    return {
+      ok: true as const,
+      asin,
+      imageUrl: null,
+      matched: false as const,
+      foundImage: false as const,
+      description: null,
+    };
+  }
+
   let description: string;
   try {
     description = await generateGearDescription(
@@ -273,7 +287,7 @@ export async function reloadGearFromAsinAction(
     ok: true as const,
     asin,
     imageUrl: image.imageUrl,
-    matched: image.matched,
+    matched: true as const,
     foundImage: !!image.imageUrl,
     description,
   };

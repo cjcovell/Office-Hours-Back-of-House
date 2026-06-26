@@ -41,7 +41,10 @@ export function AdminGearEditor({ gear }: { gear: GearItemRow }) {
     status: gear.status,
   });
   const [error, setError] = useState<string | null>(null);
-  const [success, setSuccess] = useState(false);
+  // Holds the success-banner copy. Distinct operations ("Saved." vs a
+  // non-persisting reload) need different wording, so this is a message
+  // rather than a bare boolean.
+  const [successMsg, setSuccessMsg] = useState<string | null>(null);
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [isPending, startTransition] = useTransition();
   const [isReFetching, startReFetch] = useTransition();
@@ -50,7 +53,7 @@ export function AdminGearEditor({ gear }: { gear: GearItemRow }) {
   function handleSave(e: React.FormEvent) {
     e.preventDefault();
     setError(null);
-    setSuccess(false);
+    setSuccessMsg(null);
     const fd = new FormData();
     fd.set("id", gear.id);
     fd.set("name", form.name);
@@ -67,7 +70,7 @@ export function AdminGearEditor({ gear }: { gear: GearItemRow }) {
         setError(res.error);
         return;
       }
-      setSuccess(true);
+      setSuccessMsg("Saved.");
     });
   }
 
@@ -83,7 +86,7 @@ export function AdminGearEditor({ gear }: { gear: GearItemRow }) {
   /** One-click Amazon re-lookup using the current brand/name/model. */
   function handleReFetch() {
     setError(null);
-    setSuccess(false);
+    setSuccessMsg(null);
     startReFetch(async () => {
       const res = await lookupGearAmazonAction(gear.id, { force: true });
       if ("rateLimited" in res && res.rateLimited) {
@@ -103,10 +106,14 @@ export function AdminGearEditor({ gear }: { gear: GearItemRow }) {
         const bits: string[] = [];
         if (res.foundAsin) bits.push("ASIN");
         if (res.foundImage) bits.push("image");
-        setSuccess(true);
         if (bits.length === 0) {
           setError("No confident match on Amazon — leaving fields unchanged.");
-          setSuccess(false);
+        } else {
+          setSuccessMsg(
+            `Loaded ${bits.join(" + ")} — review and Save to keep ${
+              bits.length > 1 ? "them" : "it"
+            }.`
+          );
         }
       }
     });
@@ -120,7 +127,7 @@ export function AdminGearEditor({ gear }: { gear: GearItemRow }) {
    */
   function handleReloadFromAsin() {
     setError(null);
-    setSuccess(false);
+    setSuccessMsg(null);
     startReloadAsin(async () => {
       const res = await reloadGearFromAsinAction(gear.id, form.asin);
       if ("rateLimited" in res && res.rateLimited) {
@@ -132,31 +139,40 @@ export function AdminGearEditor({ gear }: { gear: GearItemRow }) {
         return;
       }
       if ("ok" in res && res.ok) {
+        // When the ASIN didn't resolve, the action returns null fields and
+        // we change nothing — don't clobber the curated description or the
+        // existing image with a wrong/empty regeneration.
         setForm((cur) => ({
           ...cur,
-          description: res.description,
-          // Only swap the image when we positively matched the ASIN —
-          // otherwise keep whatever's there rather than blank it out.
+          description: res.description ?? cur.description,
           image_url: res.foundImage ? res.imageUrl ?? "" : cur.image_url,
         }));
         if (!res.matched) {
           setError(
-            `Couldn't find ASIN ${res.asin} on Amazon — description refreshed, image left unchanged. Double-check the ASIN.`
+            `Couldn't find ASIN ${res.asin} on Amazon — nothing was changed. Double-check the ASIN.`
+          );
+        } else if (res.foundImage) {
+          setSuccessMsg(
+            "Image and description loaded — review and Save to keep them."
           );
         } else {
-          setSuccess(true);
+          setSuccessMsg(
+            "Description reloaded; couldn't verify a product image for this ASIN, so the image was left unchanged. Review and Save."
+          );
         }
       }
     });
   }
 
   const asinReady = /^[A-Z0-9]{10}$/.test(form.asin);
-  const previewUrl = form.asin.length === 10 ? buildAmazonUrl(form.asin) : null;
+  // Gate the preview link on the same validity check as the reload button
+  // so the two adjacent controls never disagree on what a usable ASIN is.
+  const previewUrl = asinReady ? buildAmazonUrl(form.asin) : null;
 
   return (
     <form onSubmit={handleSave} className="space-y-6">
       {error ? <Alert tone="destructive">{error}</Alert> : null}
-      {success ? <Alert tone="success">Saved.</Alert> : null}
+      {successMsg ? <Alert tone="success">{successMsg}</Alert> : null}
 
       <Card>
         <CardContent className="space-y-4 p-6">
