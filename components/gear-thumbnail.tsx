@@ -42,8 +42,8 @@ export function GearThumbnail({ gear }: { gear: GearItemRow }) {
         />
       </a>
 
-      {/* Enlarged preview — shown on hover/focus of the thumbnail group. */}
-      <div className="pointer-events-none absolute left-0 top-full z-50 mt-2 origin-top-left scale-95 opacity-0 transition-all duration-150 group-hover:scale-100 group-hover:opacity-100">
+      {/* Enlarged preview — shown on hover or keyboard focus of the group. */}
+      <div className="pointer-events-none absolute left-0 top-full z-50 mt-2 origin-top-left scale-95 opacity-0 transition-all duration-150 group-hover:scale-100 group-hover:opacity-100 group-focus-within:scale-100 group-focus-within:opacity-100">
         {/* eslint-disable-next-line @next/next/no-img-element */}
         <img
           src={gear.image_url}

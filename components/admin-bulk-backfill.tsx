@@ -176,6 +176,7 @@ export function AdminBulkBackfill() {
     const MAX_WORK_ATTEMPTS = 3;
     const MAX_TOTAL_ITERATIONS = 25; // safety net (errors + rate-limit waits)
     let workAttempts = 0;
+    let rateLimitWaits = 0;
     let lastError = "Too many retries";
 
     for (let i = 0; i < MAX_TOTAL_ITERATIONS; i++) {
@@ -186,7 +187,13 @@ export function AdminBulkBackfill() {
 
       if (res.kind === "rate-limited") {
         // Not a failure — wait for the window to reset and retry without
-        // spending the error budget.
+        // spending the error budget. Track it so that, if we bail out
+        // having only ever been rate-limited, the reported reason names
+        // that rather than a generic "Too many retries".
+        rateLimitWaits++;
+        lastError = `Still rate-limited after ${rateLimitWaits} wait${
+          rateLimitWaits === 1 ? "" : "s"
+        }`;
         await sleep((res.retryAfterSeconds ?? 2) * 1000 + 250);
         continue;
       }
